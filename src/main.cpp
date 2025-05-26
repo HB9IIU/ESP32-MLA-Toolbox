@@ -97,7 +97,7 @@ void displayFrequAtBottom(unsigned long freq, int x, int y);
 int readAveragedAdc(int pin, int samples);
 void setFrequencyInMhz(float freqMHz);
 unsigned long findResonanceFrequency();
-
+bool initSI5351();
 String formatFrequencyWithDots(unsigned freq);
 
 // related to keypad
@@ -327,27 +327,7 @@ void setup()
     // Update NTP time
     updateNTPTime();
 
-    // 🛠️ Initialize the Si5351 Clock Generator
-    Serial.println("\n📡 Setting up Si5351 module...");
-    si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
-
-    // 🔧 Apply Calibration Factor
-    Serial.print("🔧 Applying Calibration Factor: ");
-    Serial.println(cal_factor);
-    si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
-
-    // 🎯 Set Desired Reference Frequency for TX Operation
-    Serial.print("📶 Setting TX Reference Frequency: ");
-    Serial.print(TX_referenceFrequ);
-    Serial.println(" Hz");
-    si5351.set_freq(TX_referenceFrequ, SI5351_CLK0); // Set frequency for CLK0 output
-
-    // ⚡ Configure Drive Strength and Power State
-    Serial.println("💪 Setting Drive Strength: 8 mA");
-    si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA); // best results
-                                                          // si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_6MA);
-    // si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_4MA);
-    // si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_2MA);
+initSI5351();
 
     Serial.println("🔌 Powering down CLK0 output initially.");
     si5351.set_clock_pwr(SI5351_CLK0, 0); // Power down CLK0 initially (0 = power off)
@@ -496,6 +476,9 @@ void setup()
 
   modeOfOperation = 1;
 }
+
+
+
 // ################################################################################################
 // Loop Function
 
@@ -2044,7 +2027,7 @@ void setFrequencyInMhz(float freqMHz)
 
 unsigned long findResonanceFrequency()
 {
-  bool verbose = false;
+  bool verbose = true;
 
   const unsigned long coarseStartHz = 9000000UL;
   const unsigned long coarseEndHz   = 20000000UL;
@@ -2123,7 +2106,7 @@ fineAdcSamples = 3;
     si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
-    Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
+    //Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
 
     if (tempCount < MAX_SWEEP_POINTS) {
       tempFreq[tempCount] = freqHz;
@@ -2613,4 +2596,42 @@ void displayMenu()
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
   tft.drawRightString(String("Version: ") + VERSION, 300, 220, 1);
+}
+
+
+bool initSI5351()
+{
+  const uint8_t SI5351_ADDRESS = 0x60;
+
+  Wire.begin(); // Start I2C (you can customize pins if needed)
+
+  // 🧪 Check if Si5351 is responding on I²C
+  Wire.beginTransmission(SI5351_ADDRESS);
+  if (Wire.endTransmission() != 0)
+  {
+    Serial.println("❌ Si5351 not found at 0x60. Check wiring or power.");
+    return false;
+  }
+
+  Serial.println("✅ Success! Si5351 module found!! 🎉");
+  Serial.println("📡 Initializing Si5351...");
+
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+
+  Serial.print("🔧 Applying Calibration Factor: ");
+  Serial.println(cal_factor);
+  si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+
+  Serial.print("📶 Setting TX Reference Frequency: ");
+  Serial.print(TX_referenceFrequ);
+  Serial.println(" Hz");
+  si5351.set_freq(TX_referenceFrequ, SI5351_CLK0);
+
+  Serial.println("💪 Setting Drive Strength: 8 mA");
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+
+  Serial.println("🔌 Powering down CLK0 output initially.");
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+
+  return true;
 }
