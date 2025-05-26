@@ -10,3 +10,4 @@ extra_script.py
 include/
 .vscode/
 python/
+.DS_Store
