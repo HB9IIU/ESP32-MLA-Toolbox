@@ -1,5 +1,12 @@
 // ################################################################################################
 // Includes
+#ifdef MYCONFIG_H_EXISTS
+    #include <myconfig.h>  // Only include myconfig.h if it exists
+#else
+    #include <config.h>     // Include config.h if configDS.h is not present
+#endif
+
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <TFT_eSPI.h> //TFT graphics library
@@ -282,8 +289,9 @@ void setup()
     Serial.println("No stored WiFi credentials found.");
     Serial.println("ESP will enter in AP mode");
     APmode = true;
-    storedSSID = "MESH";
-    storedPassword = "Nestle2010Nestle";
+    storedSSID = WIFI_SSID;
+    storedPassword = WIFI_PASSWORD;
+
     // Assign stored credentials to WiFi credentials
     ssid = storedSSID.c_str();
     password = storedPassword.c_str();

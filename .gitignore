@@ -11,3 +11,4 @@ include/
 .vscode/
 python/
 .DS_Store
+myconfig.h
