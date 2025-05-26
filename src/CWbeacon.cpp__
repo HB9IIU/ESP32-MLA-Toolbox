@@ -1,0 +1,455 @@
+// Project: Stepper + SI5351 + ADC Tuning with Centering
+// Author: Daniel (HB9IIU) with improvements
+// Platform: ESP32 + TMC2208 + SI5351 + ADC
+
+#include <Wire.h>
+#include <si5351.h>
+#include <PNGdec.h>   //PNG image decoding library
+#include <TFT_eSPI.h> //TFT graphics library
+#include "FS.h"
+#include "SPIFFS.h"
+PNG png;                   // create png instance
+TFT_eSPI tft = TFT_eSPI(); // create tft instance
+void displayPNGfromSPIFFS(const char *filename, int duration_ms);
+
+void clearDisplayLine();
+
+void displayMessageAtBottom(String message, int y);
+
+String currentDisplayMessage = "";
+int cwBeaconMessageCursorX = 10;  // Start X position for text
+int cwBeaconMessageCursorY = 130; // Y position for text
+
+void mountSPIFFSandListContent();
+void listDirSPIFFS(const char *dirname, uint8_t levels);
+//----------------------------------------------------------------------------------
+// Constants and Macros
+
+void updateDisplay();
+
+// Function Prototypes
+void setFrequency(float freqMHz);
+void displaySplashScreen(int duration);
+void cw_string_proc(String str);
+void cw_char_proc(char m);
+void di();
+void dah();
+void char_space();
+void cw(bool state);
+void word_space();
+//----------------------------------------------------------------------------------
+
+String cwBeaconMessage = "VVV de HB9IIU  LOCATOR IS JN36kl  PWR IS 15mW  ANT IS MAGNETIC LOOP"; // Your message
+uint8_t cwWPM = 15;                                                                             // Desired speed in Words Per Minute
+uint16_t cwDitDurationMs;                                                                       // Calculated dot duration in ms
+//--------------------------------------------------------------
+Si5351 si5351;
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(4000);
+    mountSPIFFSandListContent();
+
+    tft.begin();
+    tft.setRotation(1);
+    tft.fillScreen(TFT_BLACK); // Fill the screen with black color
+
+    displayPNGfromSPIFFS("splash.png", 2000);
+
+    // CW Beacon Related
+    cwDitDurationMs = 1200 / cwWPM;
+    tft.fillScreen(TFT_NAVY);     // Background navy blue
+    tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
+    tft.drawCentreString("CW Beacon", 160, 5, 4);
+    tft.setTextColor(TFT_GREEN, TFT_NAVY); // Foreground and background color
+    tft.setTextSize(1);
+    tft.drawString("14.345.789", 10, 55, 7); // Correct for full strings
+
+    Wire.begin(21, 22);
+    if (!si5351.init(SI5351_CRYSTAL_LOAD_8PF, 25000000, 0))
+    {
+        Serial.println("SI5351 not found!");
+        while (true)
+            ;
+    }
+    si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_2MA);
+    si5351.set_correction(0, SI5351_PLL_INPUT_XO);
+    Serial.println("SI5351 initialized.");
+
+    setFrequency(14.005);
+}
+
+void loop()
+{
+
+    cw_string_proc(cwBeaconMessage);
+    delay(1500); // Duration of the break at the end before the long signal - in milliseconds
+    cw(true);
+    delay(3000); // Duration of the long signal at the end - in milliseconds
+    currentDisplayMessage = "";
+    clearDisplayLine();
+    cw(false);
+    delay(5000); // Duration of the pause at the end after the long signal - in milliseconds
+}
+
+void mountSPIFFSandListContent()
+{
+    if (!SPIFFS.begin(true)) // 'true' will auto-format if FS is corrupted
+    {
+        Serial.println("An Error has occurred while mounting SPIFFS");
+        return;
+    }
+    Serial.println("SPIFFS mounted successfully!");
+
+    listDirSPIFFS("/", 255); // Assuming you have a listDirSPIFFS function implemented
+}
+
+void listDirSPIFFS(const char *dirname, uint8_t levels)
+{
+    Serial.printf("Listing directory: %s\n", dirname);
+
+    fs::File root = SPIFFS.open(dirname);
+    if (!root || !root.isDirectory())
+    {
+        Serial.println("Failed to open directory or not a directory.");
+        return;
+    }
+
+    fs::File file = root.openNextFile();
+    while (file)
+    {
+        if (file.isDirectory())
+        {
+            Serial.print("  📁 DIR : ");
+            Serial.println(file.name());
+            if (levels)
+            {
+                String path = String(dirname) + "/" + file.name();
+                listDirSPIFFS(path.c_str(), levels - 1);
+            }
+        }
+        else
+        {
+            Serial.print("  📄 FILE: ");
+            Serial.print(file.name());
+            Serial.print("\tSIZE: ");
+            Serial.println(file.size());
+        }
+        file = root.openNextFile();
+    }
+}
+
+// bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+// Function block to display png images stored in flash
+fs::File pngFile; // Global File handle (required for PNGdec callbacks)
+void *fileOpen(const char *filename, int32_t *size)
+{
+    String fullPath = "/" + String(filename);
+    pngFile = SPIFFS.open(fullPath, "r");
+    if (!pngFile)
+        return nullptr;
+    *size = pngFile.size();
+    return (void *)&pngFile;
+}
+
+void fileClose(void *handle)
+{
+    ((fs::File *)handle)->close();
+}
+
+int32_t fileRead(PNGFILE *handle, uint8_t *buffer, int32_t length)
+{
+    return ((fs::File *)handle->fHandle)->read(buffer, length);
+}
+
+int32_t fileSeek(PNGFILE *handle, int32_t position)
+{
+    return ((fs::File *)handle->fHandle)->seek(position);
+}
+
+void displayPNGfromSPIFFS(const char *filename, int duration_ms)
+{
+    if (!SPIFFS.begin(true))
+    {
+        Serial.println("Failed to mount SPIFFS!");
+        return;
+    }
+
+    int16_t rc = png.open(filename, fileOpen, fileClose, fileRead, fileSeek, [](PNGDRAW *pDraw)
+                          {
+        uint16_t lineBuffer[480];  // Adjust to your screen width if needed
+        png.getLineAsRGB565(pDraw, lineBuffer, PNG_RGB565_BIG_ENDIAN, 0xFFFFFFFF);
+        tft.pushImage(0, pDraw->y, pDraw->iWidth, 1, lineBuffer); });
+
+    if (rc == PNG_SUCCESS)
+    {
+        Serial.printf("Displaying PNG: %s\n", filename);
+        tft.startWrite();
+        png.decode(nullptr, 0);
+        tft.endWrite();
+    }
+    else
+    {
+        Serial.println("PNG decode failed.");
+    }
+
+    delay(duration_ms);
+}
+
+// bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+//-------------------------------------------------------------------------
+
+void setFrequency(float freqMHz)
+{
+    uint64_t freq = (uint64_t)(freqMHz * 1e6);
+    si5351.set_freq(freq * 100ULL, SI5351_CLK0);
+}
+
+
+
+
+
+
+//-------------CW RELATED
+void cw_string_proc(String str)
+{ // Processing string to characters
+    for (uint8_t j = 0; j < str.length(); j++)
+        cw_char_proc(str[j]);
+}
+void cw_char_proc(char m)
+{
+    String s;
+
+    if (m == ' ')
+    {
+        word_space();
+        currentDisplayMessage += ' ';
+        updateDisplay();
+        return; // Correct to return on space
+    }
+
+    if (m > 96 && m < 123)
+        m -= 32; // Convert to uppercase
+
+    // Morse code lookup
+    switch (m)
+    {
+    case 'A':
+        s = ".-#";
+        break;
+    case 'B':
+        s = "-...#";
+        break;
+    case 'C':
+        s = "-.-.#";
+        break;
+    case 'D':
+        s = "-..#";
+        break;
+    case 'E':
+        s = ".#";
+        break;
+    case 'F':
+        s = "..-.#";
+        break;
+    case 'G':
+        s = "--.#";
+        break;
+    case 'H':
+        s = "....#";
+        break;
+    case 'I':
+        s = "..#";
+        break;
+    case 'J':
+        s = ".---#";
+        break;
+    case 'K':
+        s = "-.-#";
+        break;
+    case 'L':
+        s = ".-..#";
+        break;
+    case 'M':
+        s = "--#";
+        break;
+    case 'N':
+        s = "-.#";
+        break;
+    case 'O':
+        s = "---#";
+        break;
+    case 'P':
+        s = ".--.#";
+        break;
+    case 'Q':
+        s = "--.-#";
+        break;
+    case 'R':
+        s = ".-.#";
+        break;
+    case 'S':
+        s = "...#";
+        break;
+    case 'T':
+        s = "-#";
+        break;
+    case 'U':
+        s = "..-#";
+        break;
+    case 'V':
+        s = "...-#";
+        break;
+    case 'W':
+        s = ".--#";
+        break;
+    case 'X':
+        s = "-..-#";
+        break;
+    case 'Y':
+        s = "-.--#";
+        break;
+    case 'Z':
+        s = "--..#";
+        break;
+    case '1':
+        s = ".----#";
+        break;
+    case '2':
+        s = "..---#";
+        break;
+    case '3':
+        s = "...--#";
+        break;
+    case '4':
+        s = "....-#";
+        break;
+    case '5':
+        s = ".....#";
+        break;
+    case '6':
+        s = "-....#";
+        break;
+    case '7':
+        s = "--...#";
+        break;
+    case '8':
+        s = "---..#";
+        break;
+    case '9':
+        s = "----.#";
+        break;
+    case '0':
+        s = "-----#";
+        break;
+    case '?':
+        s = "..--..#";
+        break;
+    case '=':
+        s = "-...-#";
+        break;
+    case ',':
+        s = "--..--#";
+        break;
+    case '/':
+        s = "-..-.#";
+        break;
+    default:
+        return; // Ignore unknown characters
+    }
+
+    // Add character to display and update TFT (but don’t return here!)
+    currentDisplayMessage += m;
+    updateDisplay();
+
+    // Now process and transmit the Morse sequence fully
+    for (uint8_t i = 0; i < s.length(); i++)
+    {
+        switch (s[i])
+        {
+        case '.':
+            di();
+            break;
+        case '-':
+            dah();
+            break;
+        case '#':
+            char_space();
+            return; // End of Morse sequence for this character
+        }
+    }
+}
+void di()
+{
+    cw(true); // TX di
+    delay(cwDitDurationMs);
+
+    cw(false); // stop TX di
+    delay(cwDitDurationMs);
+}
+void dah()
+{
+    cw(true); // TX dah
+    delay(3 * cwDitDurationMs);
+
+    cw(false); // stop TX dah
+    delay(cwDitDurationMs);
+}
+void char_space()
+{                               // 3x, pause between letters
+    delay(2 * cwDitDurationMs); // 1x from end of character + 2x from the beginning of new character
+}
+void word_space()
+{                               // 7x, pause between words
+    delay(6 * cwDitDurationMs); // 1x from end of the word + 6x from the beginning of new word
+}
+void cw(bool state)
+{
+    if (state)
+    {
+        si5351.output_enable(SI5351_CLK0, 1);
+    }
+    else
+    {
+        si5351.output_enable(SI5351_CLK0, 0);
+    }
+}
+void updateDisplay()
+{
+    int charWidth = tft.textWidth("M", 2); // Estimate fixed char width
+
+    // Get the last character added to the message
+    char lastChar = currentDisplayMessage[currentDisplayMessage.length() - 1];
+
+    // Draw only the new character at the current position
+    tft.setTextColor(TFT_WHITE, TFT_NAVY); // Foreground and background color
+    tft.drawChar(cwBeaconMessageCursorX, cwBeaconMessageCursorY, lastChar, TFT_WHITE, TFT_NAVY, 2);
+
+    // Advance the cursor
+    cwBeaconMessageCursorX += charWidth + 2;
+
+    // Handle line wrap if needed (optional)
+    if (cwBeaconMessageCursorX >= (320 - charWidth))
+    {
+        cwBeaconMessageCursorX = 10;
+        cwBeaconMessageCursorY += tft.fontHeight(2) + 4;
+        if (cwBeaconMessageCursorY >= 240)
+        { // If we reach the bottom, reset to starting Y
+            cwBeaconMessageCursorY = 220;
+            clearDisplayLine();
+        }
+    }
+}
+void clearDisplayLine()
+{
+
+    currentDisplayMessage = "";
+    cwBeaconMessageCursorX = 10;
+    cwBeaconMessageCursorY = 130;
+
+    tft.fillRect(0, cwBeaconMessageCursorY, 320, 240, TFT_NAVY);
+}
+
+

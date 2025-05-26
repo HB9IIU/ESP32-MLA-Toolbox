@@ -1,0 +1,79 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_MPR121.h>
+
+#define IRQ_PIN 17  // Using GPIO17 for MPR121 IRQ
+
+Adafruit_MPR121 cap = Adafruit_MPR121();
+volatile bool touchInterrupt = false;
+
+// map pad # → output character
+const char keymap[12] = {
+  '*',  // pad 0 → *
+  '7',  // pad 1 → 7
+  '4',  // pad 2 → 4
+  '1',  // pad 3 → 1
+  '0',  // pad 4 → 0
+  '8',  // pad 5 → 8
+  '5',  // pad 6 → 5
+  '2',  // pad 7 → 2
+  '#',  // pad 8 → #
+  '9',  // pad 9 → 9
+  '6',  // pad 10 → 6
+  '3'   // pad 11 → 3
+};
+
+// ISR for IRQ pin
+void IRAM_ATTR handleTouchIRQ() {
+  touchInterrupt = true;
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  Serial.println("🔌 MPR121 Touch Test with IRQ");
+
+  // Initialize IRQ pin
+  pinMode(IRQ_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(IRQ_PIN), handleTouchIRQ, FALLING);
+
+  // Initialize MPR121
+  if (!cap.begin(0x5A)) {
+    Serial.println("❌ MPR121 not found. Check wiring!");
+    while (1);
+  }
+
+  Serial.println("✅ MPR121 ready (IRQ mode).");
+}
+
+void loop() {
+  if (touchInterrupt) {
+    touchInterrupt = false;  // Reset flag
+
+    uint16_t touched = cap.touched();
+
+    for (uint8_t i = 0; i < 12; i++) {
+      if (touched & (1 << i)) {
+        Serial.print("🔘 Key ");
+        Serial.print(i);
+        Serial.print(" → ");
+        Serial.println(keymap[i]);
+      }
+    }
+  }
+
+  // Your heavy tasks here won't block touch detection
+  // Example: delay(300); or any other long task
+   for (int i = 0; i <= 1000; i++) {
+    Serial.print("🔢 Counter: ");
+    Serial.println(i);
+    delay(500);  // 500 ms delay between each step
+    if (touchInterrupt){
+    Serial.print("Touch detected");
+    break;
+
+         }
+
+  }
+  
+}

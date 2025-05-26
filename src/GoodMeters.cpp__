@@ -1,0 +1,814 @@
+// Project: Stepper + SI5351 + ADC Tuning with Centering
+// Author: Daniel (HB9IIU) with improvements
+// Platform: ESP32 + TMC2208 + SI5351 + ADC
+
+#include <Wire.h>
+#include <si5351.h>
+#include <PNGdec.h>   //PNG image decoding library
+#include <TFT_eSPI.h> //TFT graphics library
+#include "FS.h"
+#include "SPIFFS.h"
+PNG png;                   // create png instance
+TFT_eSPI tft = TFT_eSPI(); // create tft instance
+void displayPNGfromSPIFFS(const char *filename, int duration_ms);
+void meterStartUpAnimation();
+#define ADC_PIN 34
+void displayMessageAtBottom(String message, int y);
+    #define ADC_SETTLE_MS 5
+
+
+void displayFrequAtBottom(unsigned long freq,int x,int y);
+void mountSPIFFSandListContent();
+void listDirSPIFFS(const char *dirname, uint8_t levels);
+//----------------------------------------------------------------------------------
+// Constants and Macros
+
+
+
+// Global Variables for meter
+#define M_SIZE 1.3333    // Meter size scale factor for rotation(1)
+#define TFT_GREY 0x5AEB  // Custom grey color for background
+float ltx = 0;  
+uint16_t osx = M_SIZE * 120, osy = M_SIZE * 120; 
+
+String formatFrequencyWithDots(unsigned freq) ;
+
+ // Function Prototypes
+ void plotNeedle(int value);
+ void displaySplashScreen(int duration);
+ void refreshVUmeter(int value);
+ void drawAnalogMeter();
+
+//----------------------------------------------------------------------------------
+
+
+
+// === SWEEP PARAMETERS ===
+#define F_START_MHZ 10.500
+#define F_END_MHZ 25.000
+#define F_STEP_HZ 200000
+
+// === FREQUENCY TARGET ===
+#define TARGET_FREQ_MHZ 14.250
+
+Si5351 si5351;
+
+int ADC_SAMPLES = 2;
+
+int range = 0;
+int noiseFloor = 0;
+
+int bestAdcAtSweep = 0;
+long unsigned resonanceFrequ=0;
+
+struct ResonanceInfo
+{
+    float frequencyMHz;
+    int noiseFloorAdc;
+    int peakAdc;
+};
+
+void setFrequency(float freqMHz)
+{
+    uint64_t freq = (uint64_t)(freqMHz * 1e6);
+    si5351.set_freq(freq * 100ULL, SI5351_CLK0);
+}
+
+
+
+
+int readAveragedAdc(int pin, int samples)
+{
+    uint32_t sum = 0;
+    for (int i = 0; i < samples; i++)
+    {
+        sum += analogRead(pin);
+        delayMicroseconds(50);
+    }
+    return sum / samples;
+}
+
+
+
+
+ResonanceInfo findResonancePeak1()
+{
+    Serial.println("\n--- Starting Resonance Sweep ---");
+
+    float bestFreq = 0.0;
+    int bestAdc = 0;
+    int minAdc = 4096; // 12-bit ADC maximum value
+
+    // ----- Coarse Sweep -----
+    ADC_SAMPLES = 1; // Fast scanning for coarse peak detection
+    Serial.println("START");
+
+    for (float freq = F_START_MHZ; freq <= F_END_MHZ; freq += (F_STEP_HZ / 1e6))
+    {
+        setFrequency(freq);
+        int adcValue = readAveragedAdc(ADC_PIN, ADC_SAMPLES);
+
+        if (adcValue > bestAdc)
+        {
+            bestAdc = adcValue;
+            bestFreq = freq;
+        }
+        if (adcValue < minAdc)
+        {
+            minAdc = adcValue;
+        }
+    }
+
+    Serial.println("STOP");
+
+    // ----- Fine Sweep -----
+    const int spanHz = 100000;  // ±250 kHz around the coarse peak
+    const int fineStepHz = 500; // 1 kHz frequency resolution
+    float fineStartFreq = bestFreq - spanHz / 1e6;
+    float fineStopFreq = bestFreq + spanHz / 1e6;
+
+    bestFreq = 0.0;
+    bestAdc = 0;
+    minAdc = 4096;
+    ADC_SAMPLES = 3; // Increase samples for better accuracy in fine sweep
+
+    Serial.println("START");
+
+    // Variables to store 3 consecutive points for parabolic interpolation
+    float prevFreq = 0.0, currFreq = 0.0, nextFreq = 0.0;
+    int prevAdc = 0, currAdc = 0, nextAdc = 0;
+
+    bool firstSample = true;
+    bool secondSample = false;
+
+    for (float freq = fineStartFreq; freq <= fineStopFreq; freq += (fineStepHz / 1e6))
+    {
+        setFrequency(freq);
+        int adcValue = readAveragedAdc(ADC_PIN, ADC_SAMPLES);
+
+        if (firstSample)
+        {
+            prevFreq = freq;
+            prevAdc = adcValue;
+            firstSample = false;
+            secondSample = true;
+        }
+        else if (secondSample)
+        {
+            currFreq = freq;
+            currAdc = adcValue;
+            secondSample = false;
+        }
+        else
+        {
+            nextFreq = freq;
+            nextAdc = adcValue;
+
+            // Check if the current point is a local maximum (center of peak)
+            if (currAdc >= prevAdc && currAdc >= nextAdc)
+            {
+                // Parabolic interpolation to refine the frequency estimate
+                float deltaF = fineStepHz / 1e6; // Step size in MHz
+
+                // Calculate the numerator and denominator for the interpolation formula
+                int numerator = prevAdc - nextAdc;
+                int denominator = 2 * (2 * currAdc - prevAdc - nextAdc);
+
+                if (denominator != 0) // Prevent division by zero
+                {
+                    float correction = (float)numerator / denominator * deltaF;
+                    float interpolatedFreq = currFreq + correction;
+
+                    // Update best frequency and ADC only if this peak is higher than previous best
+                    if (currAdc > bestAdc)
+                    {
+                        bestAdc = currAdc;
+                        bestFreq = interpolatedFreq;
+                    }
+                }
+                else
+                {
+                    // If denominator is zero, fall back to current freq as the best guess
+                    if (currAdc > bestAdc)
+                    {
+                        bestAdc = currAdc;
+                        bestFreq = currFreq;
+                    }
+                }
+            }
+
+            // Shift the samples for the next iteration (rolling window of 3 samples)
+            prevFreq = currFreq;
+            prevAdc = currAdc;
+            currFreq = nextFreq;
+            currAdc = nextAdc;
+        }
+
+        // Also track minimum ADC value during the fine sweep
+        if (adcValue < minAdc)
+        {
+            minAdc = adcValue;
+        }
+    }
+
+    Serial.println("STOP");
+
+    // ----- Final Results -----
+    Serial.printf(">>> Peak ADC: %d at %.5f MHz (Interpolated)\n", bestAdc, bestFreq);
+    Serial.printf(">>> Noise Floor ADC: %d\n", minAdc);
+    Serial.println("--- Sweep Complete ---\n");
+    return {bestFreq, minAdc, bestAdc};
+}
+
+ResonanceInfo findResonancePeak2()
+{
+    Serial.println("\n--- Starting Resonance Sweep ---");
+    float bestFreq = 0.0;
+    int bestAdc = 0;
+    int minAdc = 4096; //  12-bit ADC max value
+    ADC_SAMPLES = 5;
+    Serial.println("START");
+    ADC_SAMPLES = 1;
+    // Coarse sweeping
+    for (float f = F_START_MHZ; f <= F_END_MHZ; f += (F_STEP_HZ / 1e6))
+    {
+        setFrequency(f);
+
+        int adc = readAveragedAdc(ADC_PIN, ADC_SAMPLES);
+        // Serial.print(f);
+        // Serial.print(";");
+        // Serial.println(adc);
+        if (adc > bestAdc)
+            if (adc > bestAdc)
+            {
+                bestAdc = adc;
+                bestFreq = f;
+            }
+        if (adc < minAdc)
+        {
+            minAdc = adc;
+        }
+    }
+    Serial.println("STOP");
+
+    Serial.println("START");
+
+    // Fine sweeping
+    int spanInHZ = 250000;
+    float f_Start = bestFreq - spanInHZ / 1e6;
+    float f_Stop = bestFreq + spanInHZ / 1e6;
+    int floatsweepStepInHz = 1000;
+    bestFreq = 0.0;
+    bestAdc = 0;
+    minAdc = 4096; //  12-bit ADC max value
+    ADC_SAMPLES = 5;
+    for (float f = f_Start; f <= f_Stop; f += (floatsweepStepInHz / 1e6))
+    {
+        setFrequency(f);
+
+        int adc = readAveragedAdc(ADC_PIN, ADC_SAMPLES);
+        // Serial.print(f);
+        // Serial.print(";");
+        // Serial.println(adc);
+        if (adc > bestAdc)
+        {
+            bestAdc = adc;
+            bestFreq = f;
+        }
+        if (adc < minAdc)
+        {
+            minAdc = adc;
+        }
+    }
+    Serial.println("STOP");
+
+    Serial.printf(">>> Peak ADC: %d at %.5f MHz\n", bestAdc, bestFreq);
+    Serial.printf(">>> Noise Floor ADC: %d\n", minAdc);
+    Serial.println("--- Sweep Complete ---\n");
+
+    return {bestFreq, minAdc, bestAdc};
+}
+
+ResonanceInfo findResonancePeak()
+{
+    Serial.println("\n--- Starting Resonance Sweep ---");
+
+    float bestFreq = 0.0;
+    int bestAdc = 0;
+    int minAdc = 4096; // 12-bit ADC max value
+
+    // ----- Coarse Sweep -----
+    ADC_SAMPLES = 1; // Fast scanning for coarse peak detection
+    Serial.println("START");
+
+    for (float freq = F_START_MHZ; freq <= F_END_MHZ; freq += (F_STEP_HZ / 1e6))
+    {
+        setFrequency(freq);
+        int adcValue = readAveragedAdc(ADC_PIN, ADC_SAMPLES);
+
+        if (adcValue > bestAdc)
+        {
+            bestAdc = adcValue;
+            bestFreq = freq;
+        }
+        if (adcValue < minAdc)
+        {
+            minAdc = adcValue;
+        }
+    }
+
+    Serial.println("STOP");
+
+    // ----- Fine Sweep with Moving Average -----
+    const int spanHz = 250000;   // ±250 kHz around the coarse peak
+    const int fineStepHz = 1000; // 1 kHz steps
+    const int smaWindowSize = 5; // Moving average window size
+
+    float fineStartFreq = bestFreq - spanHz / 1e6;
+    float fineStopFreq = bestFreq + spanHz / 1e6;
+
+    bestFreq = 0.0;
+    bestAdc = 0;
+    minAdc = 4096;
+    ADC_SAMPLES = 5; // More accurate ADC during fine sweep
+
+    Serial.println("START");
+
+    // Circular buffer for SMA
+    int adcBuffer[smaWindowSize] = {0};
+    int bufferIndex = 0;
+    int bufferCount = 0;
+    int adcSum = 0;
+
+    float freqAtBestAdc = 0.0;
+    float currentFreq = fineStartFreq;
+
+    for (float freq = fineStartFreq; freq <= fineStopFreq; freq += (fineStepHz / 1e6))
+    {
+        setFrequency(freq);
+        int adcValue = readAveragedAdc(ADC_PIN, ADC_SAMPLES);
+
+        // Update circular buffer for SMA
+        adcSum -= adcBuffer[bufferIndex];  // Remove oldest value
+        adcBuffer[bufferIndex] = adcValue; // Add new value
+        adcSum += adcValue;
+
+        bufferIndex = (bufferIndex + 1) % smaWindowSize;
+        if (bufferCount < smaWindowSize)
+            bufferCount++;
+
+        // Compute SMA only after the buffer is full
+        if (bufferCount == smaWindowSize)
+        {
+            int smaAdc = adcSum / smaWindowSize;
+
+            // Track the maximum of the smoothed values
+            if (smaAdc > bestAdc)
+            {
+                bestAdc = smaAdc;
+                bestFreq = freq - ((smaWindowSize / 2) * fineStepHz / 1e6); // Adjust for SMA center
+            }
+        }
+
+        // Track min ADC value for noise floor info
+        if (adcValue < minAdc)
+        {
+            minAdc = adcValue;
+        }
+    }
+
+    Serial.println("STOP");
+
+    // ----- Final Results -----
+    Serial.printf(">>> Peak ADC (Smoothed): %d at %.5f MHz\n", bestAdc, bestFreq);
+    Serial.printf(">>> Noise Floor ADC: %d\n", minAdc);
+    Serial.println("--- Sweep Complete ---\n");
+    Serial.println(bestFreq);
+
+    range = bestAdc - minAdc;
+
+    bestAdcAtSweep = bestAdc;
+
+    noiseFloor = minAdc;
+
+    resonanceFrequ=bestFreq*1e6;
+
+    return {bestFreq, minAdc, bestAdc};
+}
+
+
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(4000);
+    mountSPIFFSandListContent();
+
+  
+
+    pinMode(ADC_PIN, INPUT);
+    tft.begin();
+    tft.setRotation(1);
+    tft.fillScreen(TFT_BLACK); // Fill the screen with black color
+    pinMode(TFT_BL, OUTPUT);
+
+digitalWrite(TFT_BL, HIGH);  // Turn ON backlight
+    
+    tft.fillScreen(TFT_NAVY);  // Background navy blue
+    tft.setTextColor(TFT_WHITE);  // Text color white, no background fill
+
+
+    tft.fillScreen(TFT_BLACK);  // Clear the screen with white color
+
+    tft.setTextColor(TFT_WHITE);  // Text color white, no background fill
+
+    drawAnalogMeter();
+
+    meterStartUpAnimation();
+
+
+    displayMessageAtBottom("Determining Current Resonance Frequency",200); 
+    displayMessageAtBottom("Please Wait.....",220); 
+
+
+
+
+    Wire.begin(21, 22);
+    if (!si5351.init(SI5351_CRYSTAL_LOAD_8PF, 25000000, 0))
+    {
+        Serial.println("SI5351 not found!");
+        while (true)
+            ;
+    }
+    si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_2MA);
+   
+    int cal_factor=163000;
+
+    si5351.set_correction(163000, SI5351_PLL_INPUT_XO);
+    Serial.println("SI5351 initialized.");
+
+    
+    findResonancePeak();
+    setFrequency(14.096);
+    Serial.println(range);
+    Serial.println(noiseFloor);
+
+
+    int rectHeight = 80;  // Adjust based on font size
+    int rectWidth = 320;  // Full screen width
+
+    // Clear the previous message area
+    tft.fillRect(0, 240-rectHeight, rectWidth, rectHeight, TFT_BLACK);  // Use your background color
+
+
+    displayFrequAtBottom(resonanceFrequ,1,220)   ; 
+    displayFrequAtBottom(14000000,2,220) ;
+}
+
+void loop()
+{
+
+    int adcValue = readAveragedAdc(ADC_PIN, 1);
+
+    if (adcValue > bestAdcAtSweep)
+    {
+
+        range = adcValue - noiseFloor;
+    }
+    int inRange = adcValue - noiseFloor;
+    if (inRange < 0)
+    {
+        inRange = 0;
+    }
+
+    float percentage = (float)inRange / range * 100.0;
+
+    Serial.print("inRange: ");
+    Serial.print(inRange);
+    Serial.print("    ");
+
+    Serial.print("range: ");
+    Serial.print(range);
+    Serial.print("    ");
+
+    int percentageIntRounded = round(percentage);
+    Serial.print("percentage: ");
+    Serial.println(percentageIntRounded); // Display with 2 decimal places
+
+    // findResonancePeak();
+
+    plotNeedle(percentageIntRounded);
+    refreshVUmeter(percentageIntRounded);
+}
+
+void mountSPIFFSandListContent()
+{
+    if (!SPIFFS.begin(true)) // 'true' will auto-format if FS is corrupted
+    {
+        Serial.println("An Error has occurred while mounting SPIFFS");
+        return;
+    }
+    Serial.println("SPIFFS mounted successfully!");
+
+    listDirSPIFFS("/", 255); // Assuming you have a listDirSPIFFS function implemented
+}
+
+void listDirSPIFFS(const char *dirname, uint8_t levels)
+{
+    Serial.printf("Listing directory: %s\n", dirname);
+
+    fs::File root = SPIFFS.open(dirname);
+    if (!root || !root.isDirectory())
+    {
+        Serial.println("Failed to open directory or not a directory.");
+        return;
+    }
+
+    fs::File file = root.openNextFile();
+    while (file)
+    {
+        if (file.isDirectory())
+        {
+            Serial.print("  📁 DIR : ");
+            Serial.println(file.name());
+            if (levels)
+            {
+                String path = String(dirname) + "/" + file.name();
+                listDirSPIFFS(path.c_str(), levels - 1);
+            }
+        }
+        else
+        {
+            Serial.print("  📄 FILE: ");
+            Serial.print(file.name());
+            Serial.print("\tSIZE: ");
+            Serial.println(file.size());
+        }
+        file = root.openNextFile();
+    }
+}
+
+// bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+// Function block to display png images stored in flash
+fs::File pngFile; // Global File handle (required for PNGdec callbacks)
+void *fileOpen(const char *filename, int32_t *size)
+{
+    String fullPath = "/" + String(filename);
+    pngFile = SPIFFS.open(fullPath, "r");
+    if (!pngFile)
+        return nullptr;
+    *size = pngFile.size();
+    return (void *)&pngFile;
+}
+
+void fileClose(void *handle)
+{
+    ((fs::File *)handle)->close();
+}
+
+int32_t fileRead(PNGFILE *handle, uint8_t *buffer, int32_t length)
+{
+    return ((fs::File *)handle->fHandle)->read(buffer, length);
+}
+
+int32_t fileSeek(PNGFILE *handle, int32_t position)
+{
+    return ((fs::File *)handle->fHandle)->seek(position);
+}
+
+void displayPNGfromSPIFFS(const char *filename, int duration_ms)
+{
+    if (!SPIFFS.begin(true))
+    {
+        Serial.println("Failed to mount SPIFFS!");
+        return;
+    }
+
+    int16_t rc = png.open(filename, fileOpen, fileClose, fileRead, fileSeek, [](PNGDRAW *pDraw)
+                          {
+        uint16_t lineBuffer[480];  // Adjust to your screen width if needed
+        png.getLineAsRGB565(pDraw, lineBuffer, PNG_RGB565_BIG_ENDIAN, 0xFFFFFFFF);
+        tft.pushImage(0, pDraw->y, pDraw->iWidth, 1, lineBuffer); });
+
+    if (rc == PNG_SUCCESS)
+    {
+        Serial.printf("Displaying PNG: %s\n", filename);
+        tft.startWrite();
+        png.decode(nullptr, 0);
+        tft.endWrite();
+    }
+    else
+    {
+        Serial.println("PNG decode failed.");
+    }
+
+    delay(duration_ms);
+}
+
+// bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+
+
+//-------------------------------------------------------------------------
+
+ void drawAnalogMeter() {
+    //drawing the dial 
+    tft.fillRect(0, 0, 320, 168, TFT_BLACK);
+    tft.fillRect(5, 5, 310, 158, TFT_WHITE);
+    tft.drawRect(5, 5,310, 158, TFT_BLACK);
+    //labels
+    tft.setTextColor(TFT_BLACK);
+
+    tft.drawString("Ver. 1.0", 250, 132,2);
+    tft.drawString("HB9IIU", 26, 132,2);
+    tft.drawCentreString("Tuning", 160, 90,4);
+
+
+    // Draw colored scale arcs
+    for (float i = -50; i < 50; i += 0.1) {
+        int tl = 25;  
+        float sx = cos((i - 90) * DEG_TO_RAD);
+        float sy = sin((i - 90) * DEG_TO_RAD);
+        float sx2 = cos((i + 0.1 - 90) * DEG_TO_RAD);
+        float sy2 = sin((i + 0.1 - 90) * DEG_TO_RAD);
+    
+        int x0 = sx * (M_SIZE * 100 + tl) + M_SIZE * 120;
+        int y0 = sy * (M_SIZE * 100 + tl) + M_SIZE * 140;
+        int x1 = sx * M_SIZE * 100 + M_SIZE * 120;
+        int y1 = sy * M_SIZE * 100 + M_SIZE * 140;
+        int x2 = sx2 * (M_SIZE * 100 + tl) + M_SIZE * 120;
+        int y2 = sy2 * (M_SIZE * 100 + tl) + M_SIZE * 140;
+        int x3 = sx2 * M_SIZE * 100 + M_SIZE * 120;
+        int y3 = sy2 * M_SIZE * 100 + M_SIZE * 140;
+    
+        // Normalize position across the arc (0.0 to 1.0)
+        float norm = (i + 50) / 100.0;
+    
+        // Define where color zones end (0.0 to 1.0)
+        float redEnd = 0.9;    // 40% of the arc is red
+        float yellowEnd = 0.95; // Up to 70% is yellow, then green
+    
+        uint8_t r = 0, g = 0;
+    
+        if (norm < redEnd) {
+            // Red to Yellow Transition
+            r = 255;
+            g = (uint8_t)(norm / redEnd * 255);  // 0 → 255 over red zone
+        } else if (norm < yellowEnd) {
+            // Yellow to Green Transition
+            r = (uint8_t)((1.0 - (norm - redEnd) / (yellowEnd - redEnd)) * 255);  // 255 → 0 over yellow zone
+            g = 255;
+        } else {
+            // Fully Green Zone
+            r = 0;
+            g = 255;
+        }
+    
+        uint16_t color = tft.color565(r, g, 0);
+        tft.fillTriangle(x0, y0, x1, y1, x2, y2, color);
+        tft.fillTriangle(x1, y1, x2, y2, x3, y3, color);
+    }
+    
+    plotNeedle(0);  // Reset needle to zero
+}
+
+void refreshVUmeter(int value) {
+    const int numSegments = 30;
+    const int vuX = 10, vuY = 172;
+    const int vuWidth = 320, vuHeight = 38, gap = 1;
+
+    int segmentWidth = (vuWidth - (numSegments - 1) * gap) / numSegments;
+    int active = map(value, 0, 100, 0, numSegments);
+
+    float redEnd = 0.9;      // 90% of the scale is red→yellow transition
+    float yellowEnd = 0.95;  // 95% is yellow→green transition
+
+    for (int i = 0; i < numSegments; i++) {
+        int x = vuX + i * (segmentWidth + gap);
+        float norm = (float)i / (numSegments - 1);
+
+        uint8_t r = 0, g = 0;
+
+        if (norm < redEnd) {
+            r = 255;
+            g = (uint8_t)(norm / redEnd * 255);  // Red → Yellow
+        } else if (norm < yellowEnd) {
+            r = (uint8_t)((1.0 - (norm - redEnd) / (yellowEnd - redEnd)) * 255);  // Yellow → Green
+            g = 255;
+        } else {
+            r = 0;
+            g = 255;  // Fully Green
+        }
+
+        uint16_t color = (i < active) ? tft.color565(r, g, 0) : TFT_BLACK;
+        tft.fillRect(x, vuY, segmentWidth, vuHeight, color);
+    }
+}
+
+void plotNeedle(int value) {
+    static int lastValue = -999;  // Ensure initial update
+    static float last_tx = 0;
+
+    if (value < 0) value = 0;
+    if (value > 100) value = 100;
+
+    if (value == lastValue) return;  // No update needed
+
+    // Erase previous needle
+    float sdegOld = map(lastValue, -10, 110, -150, -30);
+    float sxOld = cos(sdegOld * DEG_TO_RAD);
+    float syOld = sin(sdegOld * DEG_TO_RAD);
+    float txOld = tan((sdegOld + 90) * DEG_TO_RAD);
+    int osxOld = M_SIZE * (sxOld * 98 + 120);
+    int osyOld = M_SIZE * (syOld * 98 + 140);
+    tft.drawLine(
+        M_SIZE * (120 + 20 * last_tx), 
+        M_SIZE * (140 - 20), 
+        osxOld, 
+        osyOld, 
+        TFT_WHITE
+    );
+     // Redraw text
+    tft.setTextColor(TFT_BLACK);
+    tft.drawCentreString("Tuning", 160, 90,4);
+    // Draw new needle
+    float sdeg = map(value, -10, 110, -150, -30);
+    float sx = cos(sdeg * DEG_TO_RAD);
+    float sy = sin(sdeg * DEG_TO_RAD);
+    float tx = tan((sdeg + 90) * DEG_TO_RAD);
+    int osx = M_SIZE * (sx * 98 + 120);
+    int osy = M_SIZE * (sy * 98 + 140);
+    tft.drawLine(
+        M_SIZE * (120 + 20 * tx), 
+        M_SIZE * (140 - 20), 
+        osx, 
+        osy, 
+        TFT_BLACK
+    );
+
+    lastValue = value;
+    last_tx = tx;
+}
+
+void meterStartUpAnimation() {
+    const int steps = 180;  // More steps = smoother animation
+    for (int i = 0; i <= steps; ++i) {
+        // Forward movement: 0 → 100
+        float angle = (float)i / steps * PI;  // 0 to π radians
+        int value = (int)(sin(angle) * 100);  // sin(0 to π): 0 to 1 to 0
+        plotNeedle(value);
+        refreshVUmeter(value);
+        delay(5);  // Adjust speed of animation
+    }
+}
+
+String formatFrequencyWithDots(unsigned freq) {
+    String s = String(freq);
+    int len = s.length();
+
+    // Insert dots every 3 digits from the right
+    for (int i = len - 3; i > 0; i -= 3) {
+        s = s.substring(0, i) + "." + s.substring(i);
+    }
+
+    return s + " Hz";
+}
+
+void displayFrequAtBottom(unsigned long freq,int x,int y){
+   
+    String s = String(freq);
+    int len = s.length();
+
+    // Insert dots every 3 digits from the right
+    for (int i = len - 3; i > 0; i -= 3) {
+        s = s.substring(0, i) + "." + s.substring(i);
+    }
+    tft.setTextColor(TFT_WHITE);  // Text color white, no background fill
+    #include <Fonts/FreeMonoBold9pt7b.h>
+    tft.setFreeFont(&FreeMonoBold9pt7b);  // Correct method for GFX fonts
+    if (x==1){
+        tft.drawString(s+" Hz", 5, y, 1);
+
+    }else{
+        tft.drawRightString(s+" Hz", 315, y, 1);
+
+
+    }
+}
+
+void displayMessageAtBottom(String message, int y) {
+    int rectHeight = 16;  // Adjust based on font size
+    int rectWidth = 320;  // Full screen width
+
+    // Clear the previous message area
+    tft.fillRect(0, y, rectWidth, rectHeight, TFT_BLACK);  // Use your background color
+
+    // Set text color and font as needed
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);  // Text color and background color (optional)
+    tft.drawCentreString(message, 160, y, 2);  // 160 is center X for a 320 px wide display
+}
+
+
+
+
+

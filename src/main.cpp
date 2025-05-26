@@ -1,0 +1,2608 @@
+// ################################################################################################
+// Includes
+#include <Arduino.h>
+#include <WiFi.h>
+#include <TFT_eSPI.h> //TFT graphics library
+#include <NTPClient.h>
+#include <si5351.h>
+#include <JTEncode.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include "ESPAsyncWebServer.h"
+#include "Preferences.h"
+#include <ArduinoJson.h>
+#include <ESPmDNS.h> // Library to enable mDNS (Multicast DNS) for resolving local hostnames like "device.local"
+#include <Adafruit_MPR121.h>
+//------------------------------------
+#include <PNGdec.h> //PNG image decoding library
+// #define LOAD_GFXFF  // This must be defined to use FreeFonts (GFX fonts)
+
+#define VERSION "2.0"
+
+#define IRQ_PIN 17
+
+
+
+#define MAX_SWEEP_POINTS 400
+
+unsigned long coarse_sweep_frequ[MAX_SWEEP_POINTS];
+int coarse_sweep_adc[MAX_SWEEP_POINTS];
+int coarseSweepCount = 0;
+
+unsigned long fine_sweep_frequ[MAX_SWEEP_POINTS];
+int fine_sweep_adc[MAX_SWEEP_POINTS];
+int fineSweepCount = 0;
+
+unsigned long resonanceFrequ = 0;
+int bestAdcAtSweep = 0;
+int noiseFloor = 4096;  // initial max ADC value (12-bit ADC max 4095)
+
+// Global resonance peak results for both coarse and fine sweeps
+int coarsePeakFreq = 0;
+int coarsePeakAdc  = 0;
+unsigned long finePeakFreq   = 0;
+unsigned long finePeakAdc    = 0;
+
+
+
+
+
+
+
+
+
+
+
+Adafruit_MPR121 cap = Adafruit_MPR121();
+// ################################################################################################
+// Prototype declarations
+// related to WSPR
+void printVersionBox(const String &text, String version);
+void initTFT();
+void mountAndListSPIFFS(uint8_t levels = 255, bool listContent = true);
+void displayPNGfromSPIFFS(const char *filename, int duration_ms);
+void closeSplashEffect(TFT_eSPI &tft, uint32_t hexColor = 0x000000, uint16_t delayMs = 1);
+void retrieveUserSettings();
+void connectToWiFi();
+void configure_web_server_routes();
+void initializeTimeClient();
+void updateNTPTime();
+void initializeNextTransmissionTime();
+void si5351_WarmingUp();
+void printWithThousandsSeparator(unsigned long num);
+void transmitWSPR();
+void startTransmission();
+void PowerSImoduleOFF();
+String getCheckboxStates();
+String convertPosixToHHMMSS(time_t posixTime);
+void TX_ON_counter_core0(void *parameter);
+std::string getBandFromFrequency(uint32_t frequency);
+void startAPMode();
+
+// related to tuner
+void plotNeedle(int value);
+void displaySplashScreen(int duration);
+void refreshVUmeter(int value);
+void drawAnalogMeter();
+void meterStartUpAnimation();
+void displayMessageAtBottom(String message, int y);
+void displayFrequAtBottom(unsigned long freq, int x, int y);
+int readAveragedAdc(int pin, int samples);
+void setFrequencyInMhz(float freqMHz);
+unsigned long findResonanceFrequency();
+
+String formatFrequencyWithDots(unsigned freq);
+
+// related to keypad
+void initKeypad();
+void IRAM_ATTR handleTouchIRQ();
+void displayMenu();
+int selectedModeOfOperation;
+volatile bool touchInterrupt = false;
+String lastFormattedFKPF = "";
+String titleForFrequencyInputScreen = "";
+String messageForFrequencyInputScreen = "";
+bool alredyDisplayedOnce = false;
+uint32_t selectedFrequencyViaKeypad = 0;
+bool vfoScreenShown = false;
+
+const char keymapFKPF[12] = {
+    '*', '7', '4', '1',
+    '0', '8', '5', '2',
+    '#', '9', '6', '3'};
+
+String freqStrFKPF = "";
+char lastKeyFKPF = 0;
+// TFT layout
+#define RIGHT_MARGIN_FKPF 30
+#define BASELINE_Y_FKPF 120
+
+// 🆕 Long-press tracking
+unsigned long starPressedTimeFKPF = 0;
+bool starBeingHeldFKPF = false;
+
+String formatFrequencyWithDotsFKPF(const String &s);
+bool isValidFrequency(const String &s);
+void displayFrequencyFKPF();
+void handleKey(char key);
+
+// Helpers
+void rebootESP();
+
+// Global Variables for meter
+#define M_SIZE 1.3333   // Meter size scale factor for rotation(1)
+#define TFT_GREY 0x5AEB // Custom grey color for background
+float ltx = 0;
+uint16_t osx = M_SIZE * 120, osy = M_SIZE * 120;
+
+
+
+
+#define ADC_PIN 34
+// RELATED TO CW BEACON
+void cw_string_proc(String str);
+void cw_char_proc(char m);
+void di();
+void dah();
+void char_space();
+void cw(bool state);
+void word_space();
+void clearDisplayLine();
+void updateDisplay();
+volatile bool stopCWbeacon = false;
+
+String cwBeaconMessage = "VVV de HB9IIU  LOCATOR IS JN36kl  PWR IS 15mW  ANT IS MAGNETIC LOOP"; // Your message
+uint8_t cwWPM = 15;                                                                             // Desired speed in Words Per Minute
+uint16_t cwDitDurationMs;
+String currentDisplayMessage = "";
+int cwBeaconMessageCursorX = 10;  // Start X position for text
+int cwBeaconMessageCursorY = 156; // Y position for text
+
+//---------------------------------------------------------------------------------------------
+// Create AsyncWebServer object on port 80
+AsyncWebServer server(80);
+
+// Create a Preferences object for storing and retrieving key-value pairs in non-volatile storage
+Preferences preferences;
+
+// Create the Si5351 object
+Si5351 si5351;
+
+// Create the jtencode object
+JTEncode jtencode;
+
+// Create the png object
+PNG png;
+// Create the tft object
+TFT_eSPI tft = TFT_eSPI();
+
+// Define UDP client for NTP
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "time-a-g.nist.gov");
+
+int modeOfOperation = 0;
+
+// Constants for WSPR band start frequencies (in Hz)
+const unsigned long long WSPRbandStartFrequencies[] = {
+    356860000ULL,  // 80 m -> 3.568.600 Hz
+    528720000ULL,  // 60 m -> 5.287.200 Hz
+    703860000ULL,  // 40 m -> 7.038.600 Hz
+    1013870000ULL, // 30 m -> 10.138.700 Hz
+    1409560000ULL, // 20 m -> 14.095.600 Hz
+    1810460000ULL, // 17 m -> 18.104.600 Hz
+    2109460000ULL, // 15 m -> 21.094.600 Hz
+    2492460000ULL, // 12 m -> 24.924.600 Hz
+    2812460000ULL, // 10 m -> 28.124.600 Hz
+    50393000ULL    // 6 m  -> 50.293.000 Hz
+};
+
+// Dynamic array to store selected frequencies
+// unsigned long long *scheduleFrequencies = nullptr;
+// int selectedCount = 0;
+// int loopIndex = 0;
+
+// Frequency used for transmission
+
+// Timing variables
+volatile bool isFirstIteration = true;
+volatile bool interruptWSPRcurrentTX = false;
+time_t currentEpochTime;
+time_t nextPosixTxTime;
+time_t currentRemainingSeconds;
+time_t intervalBetweenTx;
+
+// timeOffset declaration
+int timeOffset = 0; // not used yet
+
+// TX status
+bool tx_is_ON = false;
+int tx_ON_running_time_in_s = 0;
+
+// Calibration variables
+int32_t cal_factor = 0;
+int calFrequencyInMhz = 0;
+// WiFi credentials
+const char *ssid = "";
+const char *password = "";
+
+// Variable to track if we need to start AP mode
+bool APmode = true;
+// Global variable to store the scanned networks
+String scannedNetworksJson;
+// Optional network configuration
+
+char call[7]; // USER CALLSIGN will be retrieved through preferences
+char loc[7];  // USER MAIDENHEAD GRID LOCATOR first 6 letters.
+uint8_t dbm = 24;
+
+// WSPR general settings
+bool warmingup = false;
+unsigned long long WSPR_TX_operatingFrequ;
+unsigned long long TX_referenceFrequ;
+unsigned long long calibrationFrequ = 1400000000ULL;
+TaskHandle_t txCounterTaskHandle = NULL;
+
+#define TONE_SPACING 146 // ~1.46 Hz
+#define WSPR_DELAY 683   // Delay value for WSPR
+#define WSPR_CTC 10672   // CTC value for WSPR
+#define SYMBOL_COUNT WSPR_SYMBOL_COUNT
+
+#define SEND_INTV 10
+#define RECV_TIMEOUT 10
+
+#define SI5351_REF 25000000UL // si5351’s crystal frequency, 25 Mhz or 27 MHz
+uint8_t tx_buffer[SYMBOL_COUNT];
+
+// ################################################################################################
+// Setup Function
+
+void setup()
+{
+  Serial.begin(115200); // Start serial communication at 115200 baud rate
+  delay(100);           // Delay for 100 milliseconds for stable serial communication, or 5000 for debug in Visual Studio
+
+  mountAndListSPIFFS();
+
+  printVersionBox("Beta", VERSION);
+
+  initTFT();
+
+  initKeypad();
+
+  displayPNGfromSPIFFS("splash.png", 0); // will stay on enough time due to next steps
+
+  // Initialize Preferences storage with namespace "settings" for read-write access
+  preferences.begin("settings", false);
+  // Check if WiFi credentials are stored in preferences
+  String storedSSID = preferences.getString("ssid", "");
+  String storedPassword = preferences.getString("password", "");
+
+  if (storedSSID == "" || storedPassword == "")
+  {
+    Serial.println("No stored WiFi credentials found.");
+    Serial.println("ESP will enter in AP mode");
+    APmode = true;
+    storedSSID = "MESH";
+    storedPassword = "Nestle2010Nestle";
+    // Assign stored credentials to WiFi credentials
+    ssid = storedSSID.c_str();
+    password = storedPassword.c_str();
+    APmode = false;
+  }
+  else
+  {
+    Serial.println("Stored WiFi credentials found:");
+    Serial.print("- SSID: ");
+    Serial.println(storedSSID);
+    Serial.print("- PASS: ");
+    Serial.println(storedPassword);
+    // Assign stored credentials to WiFi credentials
+    ssid = storedSSID.c_str();
+    password = storedPassword.c_str();
+    APmode = false;
+  }
+
+  if (APmode == false)
+  {
+    // Retrieve user settings
+    retrieveUserSettings();
+
+    // Establish WiFi Connection
+    connectToWiFi();
+
+    // Start Web server
+    configure_web_server_routes();
+
+    // Initialize timeClient for NTP synchronization
+    initializeTimeClient();
+
+    // Update NTP time
+    updateNTPTime();
+
+    // 🛠️ Initialize the Si5351 Clock Generator
+    Serial.println("\n📡 Setting up Si5351 module...");
+    si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+
+    // 🔧 Apply Calibration Factor
+    Serial.print("🔧 Applying Calibration Factor: ");
+    Serial.println(cal_factor);
+    si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+
+    // 🎯 Set Desired Reference Frequency for TX Operation
+    Serial.print("📶 Setting TX Reference Frequency: ");
+    Serial.print(TX_referenceFrequ);
+    Serial.println(" Hz");
+    si5351.set_freq(TX_referenceFrequ, SI5351_CLK0); // Set frequency for CLK0 output
+
+    // ⚡ Configure Drive Strength and Power State
+    Serial.println("💪 Setting Drive Strength: 8 mA");
+    si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA); // best results
+                                                          // si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_6MA);
+    // si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_4MA);
+    // si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_2MA);
+
+    Serial.println("🔌 Powering down CLK0 output initially.");
+    si5351.set_clock_pwr(SI5351_CLK0, 0); // Power down CLK0 initially (0 = power off)
+  }
+  else
+  {
+    startAPMode();
+  }
+  closeSplashEffect(tft);
+
+  /*
+  drawAnalogMeter();
+
+  meterStartUpAnimation();
+
+  displayMessageAtBottom("Determining Current Resonance Frequency", 200);
+  displayMessageAtBottom("Please Wait.....", 220);
+
+  resonanceFrequ = findResonanceFrequency();
+
+  String s = String(resonanceFrequ);
+  int len = s.length();
+
+  // Insert dots every 3 digits from the right
+  for (int i = len - 3; i > 0; i -= 3)
+  {
+    s = s.substring(0, i) + "." + s.substring(i);
+  }
+
+  // Clear the previous message area
+  tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);          // Foreground and background color
+
+  tft.drawCentreString(s, 160, 180, 7);
+  delay(3000);
+  tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+  tft.drawCentreString("Enter Target Frequency", 160, 175, 4);
+  tft.drawCentreString("and press #", 160, 210, 4);
+
+  delay(0);
+  tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+
+  //}
+
+  displayFrequAtBottom(resonanceFrequ, 1, 220);
+  displayFrequAtBottom(14000000, 2, 220);
+
+  setFrequencyInMhz(14.0971);
+  modeOfOperation = 0;
+  // ###############################################################################################
+
+  // CW BEACON
+  cwDitDurationMs = 1200 / cwWPM;
+
+  tft.fillScreen(TFT_NAVY);     // Background navy blue
+  tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
+  tft.fillRect(0, 0, 320, 30, TFT_DARKGREY);
+  tft.drawCentreString("CW Beacon", 160, 4, 4);
+  tft.setTextColor(TFT_WHITE); // Text color white, no background fill
+
+  // tft.setTextDatum(TC_DATUM);  // Top-Center datum if you want centered text
+  tft.drawCentreString("14.345.789", 160, 55, 7); // Centered horizontally at X=160
+
+  setFrequencyInMhz(14.345);
+  tft.setFreeFont();
+
+  delay(0);
+
+  modeOfOperation = 2;
+
+  // VFO
+  // Title Box
+  tft.fillScreen(TFT_NAVY);     // Background navy blue
+  tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
+  tft.fillRect(0, 0, 320, 30, TFT_DARKGREY);
+  tft.drawCentreString("VFO & Calibration", 160, 4, 4);
+  tft.setTextColor(TFT_WHITE);         // Text color white, no background fill
+  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
+
+  tft.setTextColor(TFT_WHITE, TFT_NAVY); // Foreground and background color
+
+  tft.drawCentreString("14.345.789", 160, 35, 7); // Centered horizontally at X=160
+
+
+  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
+  int x = 10;                          // Left margin
+  int y = 90;                          // Starting Y position
+  int lineGap = 16;                    // Default vertical gap between lines
+  tft.setTextDatum(TL_DATUM);          // Top-left alignment
+  tft.drawString("Calibrating Output Frequency...", x, y);
+  y += lineGap + 8;
+
+  tft.drawString("1. Tune your transceiver to", x, y);
+  y += lineGap;
+  tft.drawString("   the indicated frequency", x, y);
+  y += lineGap + 8;
+
+  tft.drawString("2. Adjust using keys:", x, y);
+  y += lineGap + 3;
+  tft.drawString("  [1] Increase Frequency", x, y);
+  y += lineGap + 3;
+  tft.drawString("  [3] Decrease Frequency", x, y);
+  y += lineGap + 8;
+  tft.drawString("3. Press [#] when done", x, y);
+  modeOfOperation = 3;
+  delay(0);
+
+  // WSPR
+  // Title Box
+  tft.fillScreen(TFT_NAVY);     // Background navy blue
+  tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
+  tft.fillRect(0, 0, 320, 30, TFT_DARKGREY);
+  tft.drawCentreString("WSPR MODE", 160, 4, 4);
+  tft.setTextColor(TFT_WHITE);         // Text color white, no background fill
+  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
+
+  y = 33;
+  lineGap = 18;
+  tft.drawString("📡 Select WSPR Band:", x, y);
+  y += lineGap + 5;
+
+  tft.drawString("[1] 80 m  (3.592.600 Hz)", x, y);
+  y += lineGap;
+  tft.drawString("[2] 40 m  (7.038.600 Hz)", x, y);
+  y += lineGap;
+  tft.drawString("[3] 30 m (10.140.200 Hz)", x, y);
+  y += lineGap;
+  tft.drawString("[4] 20 m (14.097.100 Hz)", x, y);
+  y += lineGap;
+  tft.drawString("[5] 17 m (18.106.100 Hz)", x, y);
+  y += lineGap;
+  tft.drawString("[6] 15 m (21.096.100 Hz)", x, y);
+  y += lineGap;
+  tft.drawString("[7] 12 m (24.926.100 Hz)", x, y);
+  y += lineGap;
+  tft.drawString("[8] 10 m (28.124.600 Hz)", x, y);
+  y += lineGap + 10;
+
+  tft.drawString("Press [0] to Quit", x, y);
+  delay(0);
+  displayPNGfromSPIFFS("world.png", 1000);
+  displayPNGfromSPIFFS("eur.png", 1000);
+*/
+  // MENU
+  displayMenu();
+
+  modeOfOperation = 1;
+}
+// ################################################################################################
+// Loop Function
+
+void loop()
+{
+  // modeOfOperation
+  // [1] MLA Tuning
+  // [2] WSPR Tuning
+  // [3] CW Beacon
+  // [4] VFO
+  // [5] Diagnostic
+  // [6] About
+  // [0] Restart
+
+  // [0] Restart
+  if (modeOfOperation == 0)
+  {
+    rebootESP();
+  }
+  // [1] Tuning mode
+
+  if (modeOfOperation == 1)
+
+  {
+
+    // drawAnalogMeter();
+    tft.fillScreen(TFT_BLACK);
+    // meterStartUpAnimation();
+
+    // displayMessageAtBottom("Determining Current Resonance Frequency", 200);
+    // displayMessageAtBottom("Please Wait.....", 220);
+    // delay(5000);
+    resonanceFrequ = findResonanceFrequency();
+
+    // Clear the previous message area
+    tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);          // Foreground and background color
+
+    tft.drawCentreString(formatFrequencyWithDots(resonanceFrequ), 160, 180, 7);
+    // delay(3000);
+    // tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+    // tft.drawCentreString("Enter Target Frequency", 160, 175, 4);
+    /// tft.drawCentreString("and press #", 160, 210, 4);
+
+    // delay(0);
+    // tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+
+    //}
+    /*
+      displayFrequAtBottom(resonanceFrequ, 1, 220);
+      displayFrequAtBottom(14000000, 2, 220);
+
+        int adcValue = readAveragedAdc(ADC_PIN, 1);
+
+        if (adcValue > bestAdcAtSweep)
+        {
+
+          range = adcValue - noiseFloor;
+        }
+        int inRange = adcValue - noiseFloor;
+        if (inRange < 0)
+        {
+          inRange = 0;
+        }
+
+        float percentage = (float)inRange / range * 100.0;
+
+        Serial.print("inRange: ");
+        Serial.print(inRange);
+        Serial.print("    ");
+
+        Serial.print("range: ");
+        Serial.print(range);
+        Serial.print("    ");
+
+        int percentageIntRounded = round(percentage);
+        Serial.print("percentage: ");
+        Serial.println(percentageIntRounded); // Display with 2 decimal places
+
+        // findResonancePeak();
+
+        plotNeedle(percentageIntRounded);
+        refreshVUmeter(percentageIntRounded);
+        */
+    return;
+  }
+
+  // [2] WSPR mode
+  if (modeOfOperation == 2)
+  {
+    Serial.println("\nEntering WSPR loop");
+
+    timeClient.update();
+
+    if (isFirstIteration)
+    {
+      Serial.println("\nFirst Loop Iteration to determine next start");
+      initializeNextTransmissionTime();
+      isFirstIteration = false;
+      interruptWSPRcurrentTX = false;
+    }
+
+    currentEpochTime = timeClient.getEpochTime();
+    Serial.print("\nCurrent time: ");
+    Serial.println(convertPosixToHHMMSS(currentEpochTime));
+    Serial.print("Selected schedule: ");
+    Serial.print(intervalBetweenTx);
+    Serial.println(" s");
+
+    Serial.print("Next 'even minute' time: ");
+    Serial.println(convertPosixToHHMMSS(nextPosixTxTime));
+    TX_referenceFrequ = WSPRbandStartFrequencies[4];
+
+    Serial.print("TX_referenceFrequ: ");
+    Serial.println(formatFrequencyWithDots(TX_referenceFrequ / 100));
+
+    uint64_t initialRemainingSeconds = nextPosixTxTime - currentEpochTime;
+    Serial.print("Next transmission in ");
+    Serial.print(initialRemainingSeconds);
+    Serial.println(" [s]");
+
+    // Wait until the next transmission time
+    while (timeClient.getEpochTime() != nextPosixTxTime && interruptWSPRcurrentTX == false)
+    {
+      currentRemainingSeconds = nextPosixTxTime - timeClient.getEpochTime();
+
+      if (currentRemainingSeconds < 5 && warmingup == false)
+      {
+        si5351_WarmingUp();
+        initialRemainingSeconds = 5;
+      }
+
+      // delay(100); // Wait for 100 milliseconds
+    }
+
+    currentRemainingSeconds = 0;
+    nextPosixTxTime = nextPosixTxTime + intervalBetweenTx;
+
+    Serial.println("\nStarting transmission");
+    startTransmission();
+    // 🛑 Transmission End
+    if (modeOfOperation == 4)
+    {
+      si5351.set_clock_pwr(SI5351_CLK0, 0);
+    }
+    Serial.println("📴 --- TX OFF: Transmission Complete ---\n");
+
+    Serial.print("\n");
+    return;
+  }
+  // [3] CW Beacon mode
+  if (modeOfOperation == 3)
+  {
+    stopCWbeacon = false;
+    cwDitDurationMs = 1200 / cwWPM;
+    tft.fillScreen(TFT_NAVY);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.fillRect(0, 0, 320, 30, TFT_BLACK);
+    tft.drawCentreString("CW Beacon", 160, 4, 4);
+    tft.setTextColor(TFT_RED, TFT_NAVY);
+    tft.setFreeFont(&FreeSansBold12pt7b);
+    tft.drawCentreString("CW BEACON IS ON AIR", 160, 40, 1);
+    tft.drawRoundRect(10, 71, 300, 68, 5, TFT_DARKGREY);
+    tft.fillRoundRect(9, 70, 302, 70, 6, TFT_BLACK);
+    tft.drawRoundRect(9, 70, 302, 70, 6, TFT_LIGHTGREY);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawCentreString(formatFrequencyWithDots(selectedFrequencyViaKeypad), 160, 81, 7); // Centered horizontally at X=160
+    tft.setFreeFont(&FreeSans9pt7b);
+    tft.setTextColor(TFT_GREY, TFT_NAVY);
+    tft.drawCentreString("Press 0 to Stop & Exit", 160, 215, 1);
+
+    setFrequencyInMhz((float)selectedFrequencyViaKeypad / 1e6);
+    while (stopCWbeacon == false)
+    {
+      cw_string_proc(cwBeaconMessage);
+      delay(1500); // Duration of the break at the end before the long signal - in milliseconds
+      cw(true);
+      delay(3000); // Duration of the long signal at the end - in milliseconds
+      currentDisplayMessage = "";
+      clearDisplayLine();
+      cw(false);
+      delay(5000); // Duration of the pause at the end after the long signal - in milliseconds
+    }
+  }
+  // [4] VFO
+  if (modeOfOperation == 4)
+  {
+    if (!vfoScreenShown)
+    {
+      vfoScreenShown = true; // prevent re-execution
+      tft.fillScreen(TFT_NAVY);
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.fillRect(0, 0, 320, 30, TFT_BLACK);
+      tft.drawCentreString("VFO", 160, 4, 4);
+      tft.setTextColor(TFT_RED, TFT_NAVY);
+      tft.setFreeFont(&FreeSansBold12pt7b);
+      tft.drawCentreString("TX ON", 160, 45, 1);
+      tft.drawRoundRect(10, 80, 300, 68, 5, TFT_DARKGREY);
+      tft.fillRoundRect(9, 79, 302, 70, 6, TFT_BLACK);
+      tft.drawRoundRect(9, 79, 302, 70, 6, TFT_LIGHTGREY);
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.drawCentreString(formatFrequencyWithDots(selectedFrequencyViaKeypad), 160, 90, 7); // Centered horizontally at X=160
+      tft.setFreeFont(&FreeSans9pt7b);
+      tft.setTextColor(TFT_WHITE, TFT_NAVY);
+      tft.drawCentreString("Output Power: < 16 mW (12 dBm)", 150, 170, 1);
+      tft.drawCentreString("Press 0 to Stop & Exit", 160, 210, 1);
+      setFrequencyInMhz((float)selectedFrequencyViaKeypad / 1e6);
+    }
+
+    if (touchInterrupt)
+    {
+      touchInterrupt = false;
+
+      uint16_t touched = cap.touched();
+      for (uint8_t i = 0; i < 12; i++)
+      {
+        if (touched & (1 << i))
+        {
+          char key = keymapFKPF[i];
+          if (key == '0')
+          {
+            Serial.println("🆗 Key 0 pressed!");
+            esp_restart(); // XXXXXXXXXXXXX  TO BE IMPROVED
+            PowerSImoduleOFF();
+            displayMenu();
+            modeOfOperation = 6;
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  // [5] Calibration mode
+  if (modeOfOperation == 5)
+  {
+    setFrequencyInMhz(calFrequencyInMhz);
+
+    delay(500); // we do nothing
+    Serial.print(".");
+    return;
+  }
+  // [10 for 3....] Frequency Input
+  if (modeOfOperation == 10)
+  {
+    if (alredyDisplayedOnce != true)
+    {
+      tft.fillScreen(TFT_NAVY);
+      tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+      tft.fillRect(0, 0, 320, 30, TFT_BLACK);
+      tft.drawCentreString(titleForFrequencyInputScreen, 160, 4, 4);
+      tft.setTextColor(TFT_WHITE, TFT_NAVY);
+      tft.setFreeFont(&FreeSansBold12pt7b);
+      tft.drawCentreString("Enter Desired Frequency", 160, 45, 1);
+      tft.setFreeFont(&FreeSans9pt7b);
+      tft.drawCentreString(messageForFrequencyInputScreen, 160, 75, 1);
+      tft.drawRoundRect(10, 110, 300, 68, 5, TFT_DARKGREY);
+      tft.fillRoundRect(9, 109, 302, 70, 6, TFT_BLACK);
+      tft.drawRoundRect(9, 109, 302, 70, 6, TFT_LIGHTGREY);
+      tft.drawCentreString("Output Power: < 16 mW (12 dBm)", 150, 200, 1);
+
+      alredyDisplayedOnce = true;
+    }
+  }
+
+  // KEYPAD HANDLING
+  // [mode 6] Menu
+  if (touchInterrupt && modeOfOperation == 6)
+  {
+    touchInterrupt = false;
+
+    uint16_t touched = cap.touched();
+    for (uint8_t i = 0; i < 12; i++)
+    {
+      if (touched & (1 << i))
+      {
+        char key = keymapFKPF[i];
+        if (key != lastKeyFKPF)
+        {
+          lastKeyFKPF = key;
+
+          if (key >= '0' && key <= '5')
+          {
+            Serial.print("🎯 Valid key pressed: ");
+            Serial.println(key);
+            alredyDisplayedOnce = false;
+            selectedModeOfOperation = key - '0'; // e.g., '4' - '0' = 4
+
+            if (selectedModeOfOperation == 3)
+            {
+              modeOfOperation = 10; // frequency input
+              titleForFrequencyInputScreen = "CW Beacon";
+              messageForFrequencyInputScreen = "Ensuring compliance with regulations!";
+              return;
+            }
+            if (selectedModeOfOperation == 4)
+            {
+              modeOfOperation = 10; // frequency input
+              titleForFrequencyInputScreen = "VFO";
+              messageForFrequencyInputScreen = "";
+              return;
+            }
+            if (selectedModeOfOperation == 1)
+            {
+              modeOfOperation = 1; // tuning
+              return;
+            }
+          }
+          else
+          {
+            Serial.print("🚫 Ignored key: ");
+            Serial.println(key);
+          }
+        }
+        break;
+      }
+    }
+    // Reset key tracking when no key is touched
+    if (cap.touched() == 0)
+    {
+      lastKeyFKPF = 0;
+    }
+  }
+
+  // Frequency Input
+  if (touchInterrupt && modeOfOperation == 10)
+  {
+    touchInterrupt = false;
+
+    uint16_t touched = cap.touched();
+    for (uint8_t i = 0; i < 12; i++)
+    {
+      if (touched & (1 << i))
+      {
+        char key = keymapFKPF[i];
+        if (key != lastKeyFKPF)
+        {
+          lastKeyFKPF = key;
+          Serial.print("🔘 Key pressed: ");
+          Serial.println(key);
+
+          if (key == '*')
+          {
+            starPressedTimeFKPF = millis();
+            starBeingHeldFKPF = true;
+          }
+          else
+          {
+            handleKey(key);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // ✅ Check if * is still being held → handle reboot BEFORE release
+  if (starBeingHeldFKPF && (cap.touched() & (1 << 0)))
+  {
+    unsigned long heldDuration = millis() - starPressedTimeFKPF;
+
+    if (heldDuration >= 2500)
+    {
+      Serial.println("♻️ Rebooting after long * press");
+
+      // Show message before rebooting
+      tft.fillScreen(TFT_BLACK);
+      tft.setTextColor(TFT_RED, TFT_BLACK);
+      tft.setTextSize(2);
+      tft.setTextDatum(MC_DATUM);
+      tft.drawCentreString("REBOOTING", tft.width() / 2 + 10, tft.height() / 2 - 25, 4);
+
+      delay(2000);
+      ESP.restart();
+    }
+  }
+
+  // 🧠 Handle key release
+  if (cap.touched() == 0 && starBeingHeldFKPF)
+  {
+    unsigned long heldDuration = millis() - starPressedTimeFKPF;
+
+    if (heldDuration >= 500)
+    {
+      Serial.println("🧹 Long * detected: clearing input");
+
+      tft.setTextColor(TFT_BLACK, TFT_BLACK);
+      tft.drawRightString(lastFormattedFKPF, tft.width() - RIGHT_MARGIN_FKPF, BASELINE_Y_FKPF, 7);
+
+      freqStrFKPF = "";
+      lastFormattedFKPF = "";
+    }
+    else
+    {
+      handleKey('*');
+    }
+
+    starBeingHeldFKPF = false;
+    lastKeyFKPF = 0;
+  }
+
+  // 🧼 Reset lastKeyFKPF if no pad is touched (safety)
+  if (cap.touched() == 0)
+  {
+    lastKeyFKPF = 0;
+  }
+}
+// ################################################################################################
+// Functions Implementation
+
+// bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+// Function block to display png images stored in flash
+fs::File pngFile; // Global File handle (required for PNGdec callbacks)
+void *fileOpen(const char *filename, int32_t *size)
+{
+  String fullPath = "/" + String(filename);
+  pngFile = SPIFFS.open(fullPath, "r");
+  if (!pngFile)
+    return nullptr;
+  *size = pngFile.size();
+  return (void *)&pngFile;
+}
+
+void fileClose(void *handle)
+{
+  ((fs::File *)handle)->close();
+}
+
+int32_t fileRead(PNGFILE *handle, uint8_t *buffer, int32_t length)
+{
+  return ((fs::File *)handle->fHandle)->read(buffer, length);
+}
+
+int32_t fileSeek(PNGFILE *handle, int32_t position)
+{
+  return ((fs::File *)handle->fHandle)->seek(position);
+}
+
+void displayPNGfromSPIFFS(const char *filename, int duration_ms)
+{
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("Failed to mount SPIFFS!");
+    return;
+  }
+
+  int16_t rc = png.open(filename, fileOpen, fileClose, fileRead, fileSeek, [](PNGDRAW *pDraw)
+                        {
+        uint16_t lineBuffer[480];  // Adjust to your screen width if needed
+        png.getLineAsRGB565(pDraw, lineBuffer, PNG_RGB565_BIG_ENDIAN, 0xFFFFFFFF);
+        tft.pushImage(0, pDraw->y, pDraw->iWidth, 1, lineBuffer); });
+
+  if (rc == PNG_SUCCESS)
+  {
+    Serial.printf("Displaying PNG: %s\n", filename);
+    tft.startWrite();
+    png.decode(nullptr, 0);
+    tft.endWrite();
+  }
+  else
+  {
+    Serial.println("PNG decode failed.");
+  }
+
+  delay(duration_ms);
+}
+
+// bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+// ################################################################################################
+// Functions Implementation
+
+void printVersionBox(const String &text, String version)
+{
+  int textLength = text.length();
+  int versionLength = version.length(); // Get length of version string
+
+  // Calculate the width of the box
+  int width = 4 + textLength + 8 + versionLength + 4;
+
+  // Print top border
+  Serial.println();
+  for (int i = 0; i < width; i++)
+  {
+    Serial.print("#");
+  }
+  Serial.println("");
+  // Print text with version
+  Serial.print("#  ");
+  Serial.print(text);
+  Serial.print(" Version ");
+  Serial.print(version); // Print version string
+  Serial.println("  #");
+
+  // Print bottom border
+  for (int i = 0; i < width; i++)
+  {
+    Serial.print("#");
+  }
+  Serial.println();
+}
+void initTFT()
+{
+  tft.begin();
+  tft.setRotation(2);
+  tft.fillScreen(TFT_BLACK);
+  pinMode(TFT_BL, OUTPUT);
+  digitalWrite(TFT_BL, HIGH); // Turn ON backlight NOT used on the small screen ST7735_DRIVER
+}
+
+void closeSplashEffect(TFT_eSPI &tft, uint32_t hexColor, uint16_t delayMs)
+{
+  // Inline hex to RGB565 conversion
+  uint8_t r = (hexColor >> 16) & 0xFF;
+  uint8_t g = (hexColor >> 8) & 0xFF;
+  uint8_t b = hexColor & 0xFF;
+  uint16_t color = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+
+  int16_t centerX = tft.width() / 2;
+  int16_t centerY = tft.height() / 2;
+  float diagonal = sqrt(tft.width() * tft.width() + tft.height() * tft.height());
+  float maxRadius = diagonal / 2.0f;
+
+  for (float radius = maxRadius; radius > 0; radius -= 1.0f)
+  {
+    tft.drawSmoothCircle(centerX, centerY, (int16_t)radius, color, color);
+    delay(delayMs);
+  }
+}
+
+void mountAndListSPIFFS(uint8_t levels, bool listContent)
+{
+  Serial.println();
+  if (!SPIFFS.begin(true))
+  {
+    Serial.println("\n❌ Failed to mount SPIFFS.");
+    return;
+  }
+  Serial.println("\n✅ SPIFFS mounted successfully!");
+
+  if (!listContent)
+    return;
+
+  Serial.println("📂 Listing SPIFFS content:");
+  fs::File root = SPIFFS.open("/");
+  if (!root || !root.isDirectory())
+  {
+    Serial.println("❌ Failed to open root directory or not a directory.");
+    return;
+  }
+
+  fs::File file = root.openNextFile();
+  while (file)
+  {
+    if (file.isDirectory())
+    {
+      Serial.print("  📁 DIR : ");
+      Serial.println(file.name());
+      if (levels)
+      {
+        String path = String("/") + file.name();
+        mountAndListSPIFFS(levels - 1, true); // Recursive listing
+      }
+    }
+    else
+    {
+      Serial.print("  📄 FILE: ");
+      Serial.print(file.name());
+      Serial.print("\tSIZE: ");
+      Serial.println(file.size());
+    }
+    file = root.openNextFile();
+  }
+
+  // Calculate and print free space information
+  size_t total = SPIFFS.totalBytes();
+  size_t used = SPIFFS.usedBytes();
+  size_t free = total - used;
+  float percentFree = ((float)free / total) * 100.0;
+
+  Serial.println();
+  Serial.println("📊 SPIFFS Usage Info:");
+  Serial.printf("   📦 Total: %u bytes\n", total);
+  Serial.printf("   📂 Used : %u bytes\n", used);
+  Serial.printf("   📭 Free : %u bytes (%.2f%%)\n", free, percentFree);
+  Serial.println();
+}
+
+void retrieveUserSettings()
+{
+  Serial.println();
+  // 📡 Retrieve Callsign
+  String storedCall = preferences.getString("callsign");
+  if (storedCall.isEmpty())
+  {
+    Serial.println("⚠️ Callsign not found! Setting default to 'NOCALL' 🆕");
+    storedCall = "NOCALL";
+    preferences.putString("callsign", storedCall);
+  }
+  else
+  {
+    Serial.println("✅ Callsign retrieved successfully.");
+  }
+  storedCall.toCharArray(call, sizeof(call));
+  Serial.printf("📢 Callsign: %s\n", call);
+
+  // 🌍 Retrieve Locator
+  String storedLoc = preferences.getString("locator");
+  if (storedLoc.isEmpty())
+  {
+    Serial.println("⚠️ Locator not found! Setting default to 'XX00XX' 🆕");
+    storedLoc = "XX00XX";
+    preferences.putString("locator", storedLoc);
+  }
+  else
+  {
+    Serial.println("✅ Locator retrieved successfully.");
+  }
+  storedLoc.toCharArray(loc, sizeof(loc));
+  Serial.printf("📢 Locator: %s\n", loc);
+
+  // ⚡ Retrieve Power in mW
+  uint32_t power_mW = preferences.getUInt("power", 0);
+  if (power_mW == 0)
+  {
+    Serial.println("⚠️ Power value not found! Setting default to 250 mW 🆕");
+    power_mW = 250;
+    preferences.putUInt("power", power_mW);
+  }
+  else
+  {
+    Serial.println("✅ Power retrieved successfully.");
+  }
+  dbm = round(10 * log10(power_mW));
+  Serial.printf("📢 Power: %d mW → %d dBm\n", power_mW, dbm);
+
+  // ⏲️ Retrieve Schedule State
+  String scheduleState = preferences.getString("scheduleState");
+  if (scheduleState.isEmpty())
+  {
+    Serial.println("⚠️ Schedule state not found! Setting default to 2 minutes 🆕");
+    scheduleState = "schedule1";
+    preferences.putString("scheduleState", scheduleState);
+  }
+  else
+  {
+    Serial.println("✅ Schedule state retrieved successfully.");
+  }
+
+  if (scheduleState == "schedule1")
+    intervalBetweenTx = 2 * 60;
+  else if (scheduleState == "schedule2")
+    intervalBetweenTx = 4 * 60;
+  else if (scheduleState == "schedule3")
+    intervalBetweenTx = 6 * 60;
+  else if (scheduleState == "schedule4")
+    intervalBetweenTx = 8 * 60;
+  else if (scheduleState == "schedule5")
+    intervalBetweenTx = 10 * 60;
+  else
+    intervalBetweenTx = 2 * 60;
+
+  Serial.printf("📢 Transmission Interval: %d seconds (%d minutes)\n",
+                intervalBetweenTx, intervalBetweenTx / 60);
+
+  // 🔧 Retrieve Calibration Factor
+  cal_factor = preferences.getInt("cal_factor", 9999999);
+  if (cal_factor == 9999999)
+  {
+    Serial.println("⚠️ Calibration factor not found! Setting default to 0 🆕");
+    cal_factor = 0;
+    preferences.putInt("cal_factor", cal_factor);
+  }
+  else
+  {
+    Serial.println("✅ Calibration factor retrieved successfully.");
+  }
+  Serial.printf("📢 Calibration Factor: %d\n", cal_factor);
+  Serial.println();
+}
+void connectToWiFi()
+{
+  Serial.println("\n📡 Connecting to WiFi...");
+  WiFi.setHostname("HB9IIUtuner");
+  WiFi.begin(ssid, password);
+
+  int rebootCount = preferences.getInt("rebootCount", 0);
+  int retries = 0;
+
+  while (WiFi.status() != WL_CONNECTED)
+  {
+    delay(500);         // Faster animation
+    Serial.print("🔄"); // Connection attempt indicator
+    retries++;
+
+    if (retries > 20)
+    {
+      Serial.println("\n❌ Failed to connect to WiFi! Please check credentials.");
+
+      rebootCount++;
+      preferences.putInt("rebootCount", rebootCount);
+
+      if (rebootCount >= 3)
+      {
+        Serial.println("⚠️ Too many failures! Performing factory reset...");
+        preferences.clear();
+        preferences.putInt("rebootCount", 0);
+      }
+
+      preferences.end();
+      Serial.println("🔁 Rebooting now...");
+      esp_restart();
+    }
+  }
+
+  // ✅ Connected Successfully
+  preferences.putInt("rebootCount", 0); // Reset counter
+  Serial.println("\n✅ WiFi Connected Successfully!");
+  Serial.print("🌐 IP Address: ");
+  Serial.println(WiFi.localIP());
+
+  int rssi = WiFi.RSSI();
+  Serial.print("📶 Signal Strength: ");
+  Serial.print(rssi);
+  Serial.print(" dBm - ");
+
+  if (rssi >= -50)
+    Serial.println("🏆 Excellent");
+  else if (rssi >= -70)
+    Serial.println("👍 Good");
+  else if (rssi >= -80)
+    Serial.println("⚠️ Fair");
+  else
+    Serial.println("🚫 Poor");
+
+  // 🌍 Start mDNS
+  if (!MDNS.begin("HB9IIUtuner"))
+  {
+    Serial.println("❌ mDNS responder failed to start!");
+  }
+  else
+  {
+    Serial.println("✅ mDNS responder started!");
+    Serial.println("🔗 Access your device at: http://HB9IIUtuner.local");
+  }
+}
+void configure_web_server_routes()
+{
+  Serial.println("🌍 Starting Web Server Route Configuration...");
+
+  // Route for root / web page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("📄 Route: / -> /index.html");
+      request->send(SPIFFS, "/index.html", "text/html"); });
+
+  // Route for index.html web page (same as above)
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("📄 Route: /index.html -> /index.html");
+      request->send(SPIFFS, "/index.html", "text/html"); });
+
+  // Route for diagnostic.html web page (same as above)
+  server.on("/diagnostic.html", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("📄 Route: /diagnostic.html -> /diagnostic.html");
+      request->send(SPIFFS, "/diagnostic.html", "text/html"); });
+
+  server.on("/getAllSettings", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    StaticJsonDocument<256> doc;
+    doc["version"] = "Ver. " + String(VERSION);
+    doc["callsign"] = preferences.getString("callsign", "");
+    doc["locator"] = preferences.getString("locator", "");
+    doc["power"] = preferences.getUInt("power", 24);
+    doc["TX_referenceFrequ"] = TX_referenceFrequ;             
+    doc["WSPR_TX_operatingFrequ"] = WSPR_TX_operatingFrequ;  
+
+    
+    doc["scheduleState"] = preferences.getString("scheduleState", "schedule1");
+
+    String json;
+    serializeJson(doc, json);
+    request->send(200, "application/json", json); });
+
+  // Route to update schedule button state
+  server.on("/updateScheduleState", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    if (request->hasParam("id")) {
+        String scheduleState = request->getParam("id")->value();
+        preferences.putString("scheduleState", scheduleState);
+          if (scheduleState == "schedule1") intervalBetweenTx = 2 * 60;
+  else if (scheduleState == "schedule2") intervalBetweenTx = 4 * 60;
+  else if (scheduleState == "schedule3") intervalBetweenTx = 6 * 60;
+  else if (scheduleState == "schedule4") intervalBetweenTx = 8 * 60;
+  else if (scheduleState == "schedule5") intervalBetweenTx = 10 * 60;
+  else intervalBetweenTx = 2 * 60;
+  Serial.printf("📅 New schedule selected: %s ➡️ Interval set to %d minutes\n", scheduleState.c_str(), intervalBetweenTx / 60);
+isFirstIteration=true;
+interruptWSPRcurrentTX=true;
+
+    } else {
+        Serial.println("⚠️ No schedule ID received!");
+    }
+    request->send(200, "text/plain", "OK"); });
+
+  // Route for calibration web page
+  server.on("/calibrate.html", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("🔧 Route: /calibrate.html -> Calibration Mode");
+
+      request->send(SPIFFS, "/calibrate.html", "text/html"); });
+
+  // Static files: Images
+  server.on("/assets/spectrum.jpg", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("🖼️ Route: /assets/spectrum.jpg");
+      request->send(SPIFFS, "/assets/spectrum.jpg", "image/jpeg"); });
+
+  server.on("/assets/wsprlogo.png", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("🖼️ Route: /assets/wsprlogo.png");
+      request->send(SPIFFS, "/assets/wsprlogo.png", "image/png"); });
+
+  server.on("/assets/warning.png", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("🖼️ Route: /assets/warning.png");
+      request->send(SPIFFS, "/assets/warning.png", "image/png"); });
+
+  server.on("/cesium.key", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/cesium.key", "text/plain"); });
+
+  // Favicon
+  server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("🔖 Route: /favicon.ico");
+      request->send(SPIFFS, "/favicon.ico", "image/x-icon"); });
+
+  // API Endpoints - State Management
+
+  server.on("/getTimes", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+Serial.printf("📤 Sending WSPR Timing Info to web page (TX = %d s, Next = %d s)\n", tx_ON_running_time_in_s, currentRemainingSeconds);
+      StaticJsonDocument<128> doc;
+      doc["currentRemainingSeconds"] = currentRemainingSeconds;
+      doc["txRunningTime"] = tx_ON_running_time_in_s;
+      doc["TX_referenceFrequ"] = TX_referenceFrequ / 100;
+      doc["intervalBetweenTx"] = intervalBetweenTx;  
+      String json;
+      serializeJson(doc, json);
+      request->send(200, "application/json", json); });
+
+  // Callsign & Locator Management
+  server.on("/updateCallsign", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      if (request->hasParam("callsign")) {
+          String callsign = request->getParam("callsign")->value();
+          preferences.putString("callsign", callsign);
+          Serial.printf("📡 Callsign set to %s\n", callsign.c_str());
+      }
+      request->send(200, "text/plain", "Callsign updated"); });
+
+  server.on("/updateLocator", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      if (request->hasParam("locator")) {
+          String locator = request->getParam("locator")->value();
+          preferences.putString("locator", locator);
+          Serial.printf("📍 Locator set to %s\n", locator.c_str());
+      }
+      request->send(200, "text/plain", "Locator updated"); });
+
+  server.on("/getLocator", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("📤 Sending Locator...");
+      String locator = preferences.getString("locator", "");
+      StaticJsonDocument<64> doc;
+      doc["locator"] = locator;
+      String json;
+      serializeJson(doc, json);
+      request->send(200, "application/json", json); });
+
+  // Power Management
+  server.on("/updatePower", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      if (request->hasParam("power")) {
+          String power = request->getParam("power")->value();
+          preferences.putUInt("power", power.toInt());
+          Serial.printf("⚡ Power set to %s mW\n", power.c_str());
+      }
+      request->send(200, "text/plain", "Power updated"); });
+
+  server.on("/getPower", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("📤 Sending Power Info...");
+      uint32_t power = preferences.getUInt("power", 24);
+      StaticJsonDocument<64> doc;
+      doc["power"] = power;
+      String json;
+      serializeJson(doc, json);
+      request->send(200, "application/json", json); });
+
+  // Control Endpoints
+  server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("🔄 Reboot requested...");
+      request->send(200, "text/plain", "Rebooting...");
+      delay(1000);
+      ESP.restart(); });
+
+  server.on("/factoryReset", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("⚠️ Factory Reset Requested...");
+      request->send(200, "text/plain", "Factory reset...");
+      delay(1000);
+      preferences.clear();
+      ESP.restart(); });
+
+  server.on("/setFrequency", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+Serial.println("🛠️ Changing mode of operation to: Calibration");
+
+      interruptWSPRcurrentTX=true;
+      modeOfOperation=5;
+      if (request->hasParam("frequency")) {
+          String frequencyStr = request->getParam("frequency")->value();
+          calFrequencyInMhz = strtoull(frequencyStr.c_str(), NULL, 10);
+       setFrequencyInMhz(calFrequencyInMhz);
+
+Serial.printf("📡 Frequency set to %s Hz and clock powered ON.\n", formatFrequencyWithDots(calFrequencyInMhz *1e6).c_str());
+
+      }
+      request->send(200, "text/plain", "Frequency and clock power set"); });
+
+  server.on("/updateCalFactor", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      if (request->hasParam("calFactor")) {
+          cal_factor = request->getParam("calFactor")->value().toInt();
+          si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+          Serial.printf("📏 Calibration factor set to %d\n", cal_factor);
+      }
+      request->send(200, "text/plain", "Calibration factor updated"); });
+
+  server.on("/saveCalFactor", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+              modeOfOperation=2;
+        isFirstIteration = true;
+      if (request->hasParam("calFactor")) {
+          cal_factor = request->getParam("calFactor")->value().toInt();
+          preferences.putInt("cal_factor", cal_factor);
+          Serial.printf("\n📏 Calibration factor saved: %d\n", cal_factor);
+          si5351.set_clock_pwr(SI5351_CLK0, 0);// TX OFF
+          Serial.println("✅ Exiting Calibration Mode, WSPR TX Resumed.");
+      }
+      request->send(200, "text/plain", "Calibration factor saved"); });
+
+  server.on("/getCalFactor", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      
+//cal_factor = preferences.getInt("cal_factor", 0);
+Serial.printf("📤 Sending Calibration Factor: %d\n", cal_factor);
+String cal_factor_str = String(cal_factor);
+
+      request->send(200, "text/plain", cal_factor_str); });
+server.on("/sweepdata", HTTP_GET, [](AsyncWebServerRequest *request) {
+  DynamicJsonDocument doc(8192);
+
+  // Coarse sweep data
+  JsonArray coarse = doc.createNestedArray("coarse");
+  for (int i = 0; i < coarseSweepCount; i++) {
+    JsonArray point = coarse.createNestedArray();
+    point.add(coarse_sweep_frequ[i]);
+    point.add(coarse_sweep_adc[i]);
+  }
+  doc["coarseMaxFreq"] = coarsePeakFreq;
+  doc["coarseMaxADC"]  = coarsePeakAdc;
+
+  // Fine sweep data
+  JsonArray fine = doc.createNestedArray("fine");
+  for (int i = 0; i < fineSweepCount; i++) {
+    JsonArray point = fine.createNestedArray();
+    point.add(fine_sweep_frequ[i]);
+    point.add(fine_sweep_adc[i]);
+  }
+  doc["fineMaxFreq"] = finePeakFreq;
+  doc["fineMaxADC"]  = finePeakAdc;
+
+  // Send response
+  String response;
+  serializeJson(doc, response);
+  request->send(200, "application/json", response);
+});
+
+
+
+  server.begin();
+  Serial.println("✅ Web Server Routes Configuration Completed!");
+}
+void initializeTimeClient()
+{
+  Serial.println("⏰ Initializing NTP Time Client...");
+  timeClient.begin();
+  timeClient.setTimeOffset(timeOffset * 3600);
+
+  Serial.print("🌍 Time Offset set to: ");
+  Serial.print(timeOffset);
+  Serial.println(" hour(s) ⏱️");
+
+  Serial.println("✅ NTP Time Client Ready!");
+}
+void updateNTPTime()
+{
+  Serial.println("\n⏰ Attempting to update NTP time...");
+  unsigned long startTime = millis();
+  int attempts = 0;
+
+  // Try to update NTP time up to 10 times or until timeout
+  while (attempts < 10)
+  {
+    if (timeClient.update())
+    {
+      Serial.print("✅ NTP time updated successfully: ");
+      Serial.println(timeClient.getFormattedTime());
+      return; // Success, exit function
+    }
+    else
+    {
+      if (millis() - startTime > 5000)
+      {
+        Serial.println("⏳ Timeout exceeded after 5 seconds.");
+        break; // Exit the loop if timeout exceeded
+      }
+
+      Serial.print("⚠️ Failed to update NTP time. Retrying (Attempt ");
+      Serial.print(attempts + 1);
+      Serial.println("/10)...");
+      initializeTimeClient(); // Re-initialize time client
+      delay(2000);            // Wait before retrying
+      attempts++;
+    }
+  }
+
+  // If we reach here, NTP time could not be updated
+  Serial.println("❌ NTP time could not be updated after multiple attempts.");
+  Serial.println("🔄 Rebooting system...");
+
+  // Restart the ESP32
+  esp_restart();
+}
+void initializeNextTransmissionTime()
+{
+  // 🕒 Get Current Epoch Time
+  currentEpochTime = timeClient.getEpochTime();
+  int currentHour = (currentEpochTime % 86400L) / 3600;
+  int currentMinute = (currentEpochTime % 3600) / 60;
+  int currentSecond = currentEpochTime % 60;
+
+  // 🗓️ Determine Next Even Minute
+  int nextEvenMinute = (currentMinute % 2 == 0) ? currentMinute + 2 : currentMinute + 1;
+  int nextHour = currentHour;
+
+  // ⏭️ Handle Hour Rollover
+  if (nextEvenMinute >= 60)
+  {
+    nextEvenMinute = 0;
+    nextHour = (currentHour + 1) % 24;
+  }
+
+  // 📅 Calculate Next Transmission Time
+  if (nextHour != currentHour)
+  {
+    nextPosixTxTime = currentEpochTime + ((60 - currentMinute) * 60 - currentSecond) + (nextEvenMinute * 60);
+  }
+  else
+  {
+    nextPosixTxTime = currentEpochTime + (nextEvenMinute - currentMinute) * 60 - currentSecond;
+  }
+
+  // ✅ Log the Result
+  Serial.print("📅 Next Transmission Time (POSIX): ");
+  Serial.println(nextPosixTxTime);
+  Serial.print("🕑 Next TX Time (Human Readable):  ");
+  Serial.println(convertPosixToHHMMSS(nextPosixTxTime));
+}
+void si5351_WarmingUp()
+{
+  warmingup = true;
+  Serial.println();
+  Serial.println("🔥 Radio Module 'Warming Up' Started...");
+
+  // 🎛️ Apply small random frequency offset (-100 to +100 Hz)
+  WSPR_TX_operatingFrequ = TX_referenceFrequ + (100ULL * random(-100, 100));
+
+  // 📡 Log the new TX frequency with formatting
+  Serial.print("📶 Setting TX Frequency to: ");
+  printWithThousandsSeparator(WSPR_TX_operatingFrequ / 100);
+
+  // 🎙️ Determine the band name from the frequency (optional info)
+  std::string band = getBandFromFrequency(TX_referenceFrequ);
+  Serial.print("📻 Operating Band: ");
+  Serial.println(band.c_str());
+
+  // ⚙️ Configure Si5351 for transmission
+  si5351.set_freq(WSPR_TX_operatingFrequ, SI5351_CLK0);
+  si5351.set_clock_pwr(SI5351_CLK0, 1); // Power ON CLK0
+}
+void printWithThousandsSeparator(unsigned long num)
+{
+  String formattedNum = String(num);           // Convert the number to a String
+  int commaOffset = formattedNum.length() % 3; // Calculate the position of the first comma
+
+  // Insert commas every three digits
+  for (int i = commaOffset; i < formattedNum.length(); i += 4)
+  {
+    formattedNum = formattedNum.substring(0, i) + "'" + formattedNum.substring(i); // Insert comma
+  }
+
+  Serial.println("Setting TX frequency to: " + formattedNum); // Print the formatted number
+}
+void transmitWSPR()
+{
+  uint8_t i;
+
+  // 🎙️ Encode WSPR message
+  jtencode.wspr_encode(call, loc, dbm, tx_buffer);
+
+  // 🚀 Transmission Start
+  Serial.println("\n📡 --- TX ON: Starting Transmission ---");
+
+  // 🔊 Transmit each WSPR symbol
+  for (int i = 0; i < SYMBOL_COUNT; i++)
+  {
+    uint64_t toneFreq = WSPR_TX_operatingFrequ + (tx_buffer[i] * TONE_SPACING);
+    si5351.set_freq(toneFreq, SI5351_CLK0);
+    delay(WSPR_DELAY);
+    if (interruptWSPRcurrentTX == true)
+    {
+      break; // Exit the for loop
+    }
+  }
+
+  warmingup = false;
+}
+void startTransmission()
+{
+  tx_is_ON = true;
+
+  xTaskCreatePinnedToCore(
+      TX_ON_counter_core0,  // Task function
+      "TXCounterTask",      // Name of the task
+      1024,                 // Stack size in words
+      NULL,                 // Task input parameter
+      1,                    // Priority of the task
+      &txCounterTaskHandle, // Task handle
+      0                     // Core to pin the task to (0 in this case)
+  );
+
+  transmitWSPR();
+  tx_is_ON = false;
+  tx_ON_running_time_in_s = 0;
+
+  // Wait for the task to complete and clean up
+  vTaskDelete(txCounterTaskHandle);
+  txCounterTaskHandle = NULL;
+}
+
+String getCheckboxStates()
+{
+  StaticJsonDocument<512> doc;
+  for (int i = 1; i <= 7; i++)
+  {
+    String checkboxId = "checkbox" + String(i);
+    bool state = preferences.getBool(checkboxId.c_str(), false);
+    doc[checkboxId] = state;
+  }
+
+  String json;
+  serializeJson(doc, json);
+  return json;
+}
+
+String convertPosixToHHMMSS(time_t posixTime)
+{
+  // Convert epoch time to struct tm
+  struct tm *timeInfo;
+  timeInfo = localtime(&posixTime); // Use localtime() for local time or gmtime() for UTC time
+
+  // Format the time
+  char formattedTime[9]; // HH:MM:SS + null terminator
+  sprintf(formattedTime, "%02d:%02d:%02d", timeInfo->tm_hour, timeInfo->tm_min, timeInfo->tm_sec);
+
+  // Return formatted time as String
+  return String(formattedTime);
+}
+
+void TX_ON_counter_core0(void *parameter)
+{
+  tx_ON_running_time_in_s = 0;
+
+  while (tx_is_ON == true)
+  {
+    tx_ON_running_time_in_s = tx_ON_running_time_in_s + 1;
+    // Serial.printf("TX ON counter: %d seconds\n", tx_ON_running_time_in_s);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+
+  // Delete the task if tx_is_ON is false to free resources
+  vTaskDelete(NULL);
+}
+
+std::string getBandFromFrequency(uint32_t frequency)
+{
+
+  const char *bands[] = {
+      "80 m", "60 m", "40 m", "30 m", "20 m", "17 m", "15 m", "12 m", "10 m", "6 m"};
+
+  const size_t numBands = sizeof(WSPRbandStartFrequencies) / sizeof(WSPRbandStartFrequencies[0]);
+
+  for (size_t i = 0; i < numBands; ++i)
+  {
+    if (frequency >= WSPRbandStartFrequencies[i] &&
+        (i == numBands - 1 || frequency < WSPRbandStartFrequencies[i + 1]))
+    {
+      return bands[i];
+    }
+  }
+
+  return "???"; // Frequency does not match any defined bands
+}
+
+void startAPMode()
+{
+
+  // Start Access Point without password
+  Serial.println("\nStarting Access Point 'HB9IIU-WSPR-CONFIG'");
+
+  // Scan networks before starting the web server
+  Serial.println("Scanning Networks");
+
+  int numNetworks = WiFi.scanNetworks();
+  StaticJsonDocument<1024> doc;
+  JsonArray networks = doc.createNestedArray("networks");
+  for (int i = 0; i < numNetworks; i++)
+  {
+    JsonObject network = networks.createNestedObject();
+    network["ssid"] = WiFi.SSID(i);
+    network["rssi"] = WiFi.RSSI(i);
+    network["encryptionType"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured";
+  }
+  serializeJson(doc, scannedNetworksJson);
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP("HB9IIU-WSPR-CONFIG");
+
+  Serial.print("Access Point started, IP address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Route for ap.html
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/ap.html", "text/html"); });
+
+  server.on("/bootstrap/css/bootstrap.min.css", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/bootstrap/css/bootstrap.min.css", "text/css"); });
+
+  server.on("/bootstrap/css/sticky-footer-navbar.css", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/bootstrap/css/sticky-footer-navbar.css", "text/css"); });
+
+  // Route to get the list of available networks
+  server.on("/scanNetworks", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(200, "application/json", scannedNetworksJson); });
+
+  // Route to save selected SSID and username
+  server.on("/saveSelectedSSID", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    if (request->hasParam("ssid") && request->hasParam("password")) {
+      String ssid = request->getParam("ssid")->value();
+      String password = request->getParam("password")->value();
+      preferences.putString("ssid", ssid);
+      preferences.putString("password", password);
+      Serial.printf("Selected SSID saved: %s\n", ssid.c_str());
+      Serial.printf("Password saved: %s\n", password.c_str());
+      request->send(200, "text/plain", "SSID and Username saved");
+      esp_restart();
+    } else {
+      request->send(400, "text/plain", "SSID or Username not provided");
+    } });
+
+  // Start server
+  server.begin();
+  Serial.println("Server started.");
+}
+
+// ########################## RELATED TO TUNER ####################################
+
+void drawAnalogMeter()
+{
+  tft.fillScreen(TFT_BLACK);
+  // drawing the dial
+  tft.fillRect(0, 0, 320, 168, TFT_BLACK);
+  tft.fillRect(5, 5, 310, 158, TFT_WHITE);
+  tft.drawRect(5, 5, 310, 158, TFT_BLACK);
+  // labels
+  tft.setTextColor(TFT_BLACK);
+
+  tft.drawString("Ver." + String(VERSION), 250, 132, 2);
+  tft.drawString("HB9IIU", 26, 132, 2);
+  tft.drawCentreString("Tuning", 160, 90, 4);
+
+  // Draw colored scale arcs
+  for (float i = -50; i < 50; i += 0.1)
+  {
+    int tl = 25;
+    float sx = cos((i - 90) * DEG_TO_RAD);
+    float sy = sin((i - 90) * DEG_TO_RAD);
+    float sx2 = cos((i + 0.1 - 90) * DEG_TO_RAD);
+    float sy2 = sin((i + 0.1 - 90) * DEG_TO_RAD);
+
+    int x0 = sx * (M_SIZE * 100 + tl) + M_SIZE * 120;
+    int y0 = sy * (M_SIZE * 100 + tl) + M_SIZE * 140;
+    int x1 = sx * M_SIZE * 100 + M_SIZE * 120;
+    int y1 = sy * M_SIZE * 100 + M_SIZE * 140;
+    int x2 = sx2 * (M_SIZE * 100 + tl) + M_SIZE * 120;
+    int y2 = sy2 * (M_SIZE * 100 + tl) + M_SIZE * 140;
+    int x3 = sx2 * M_SIZE * 100 + M_SIZE * 120;
+    int y3 = sy2 * M_SIZE * 100 + M_SIZE * 140;
+
+    // Normalize position across the arc (0.0 to 1.0)
+    float norm = (i + 50) / 100.0;
+
+    // Define where color zones end (0.0 to 1.0)
+    float redEnd = 0.9;     // 40% of the arc is red
+    float yellowEnd = 0.95; // Up to 70% is yellow, then green
+
+    uint8_t r = 0, g = 0;
+
+    if (norm < redEnd)
+    {
+      // Red to Yellow Transition
+      r = 255;
+      g = (uint8_t)(norm / redEnd * 255); // 0 → 255 over red zone
+    }
+    else if (norm < yellowEnd)
+    {
+      // Yellow to Green Transition
+      r = (uint8_t)((1.0 - (norm - redEnd) / (yellowEnd - redEnd)) * 255); // 255 → 0 over yellow zone
+      g = 255;
+    }
+    else
+    {
+      // Fully Green Zone
+      r = 0;
+      g = 255;
+    }
+
+    uint16_t color = tft.color565(r, g, 0);
+    tft.fillTriangle(x0, y0, x1, y1, x2, y2, color);
+    tft.fillTriangle(x1, y1, x2, y2, x3, y3, color);
+  }
+
+  plotNeedle(0); // Reset needle to zero
+}
+
+void refreshVUmeter(int value)
+{
+  const int numSegments = 30;
+  const int vuX = 10, vuY = 172;
+  const int vuWidth = 320, vuHeight = 38, gap = 1;
+
+  int segmentWidth = (vuWidth - (numSegments - 1) * gap) / numSegments;
+  int active = map(value, 0, 100, 0, numSegments);
+
+  float redEnd = 0.9;     // 90% of the scale is red→yellow transition
+  float yellowEnd = 0.95; // 95% is yellow→green transition
+
+  for (int i = 0; i < numSegments; i++)
+  {
+    int x = vuX + i * (segmentWidth + gap);
+    float norm = (float)i / (numSegments - 1);
+
+    uint8_t r = 0, g = 0;
+
+    if (norm < redEnd)
+    {
+      r = 255;
+      g = (uint8_t)(norm / redEnd * 255); // Red → Yellow
+    }
+    else if (norm < yellowEnd)
+    {
+      r = (uint8_t)((1.0 - (norm - redEnd) / (yellowEnd - redEnd)) * 255); // Yellow → Green
+      g = 255;
+    }
+    else
+    {
+      r = 0;
+      g = 255; // Fully Green
+    }
+
+    uint16_t color = (i < active) ? tft.color565(r, g, 0) : TFT_BLACK;
+    tft.fillRect(x, vuY, segmentWidth, vuHeight, color);
+  }
+}
+
+void plotNeedle(int value)
+{
+  static int lastValue = -999; // Ensure initial update
+  static float last_tx = 0;
+
+  if (value < 0)
+    value = 0;
+  if (value > 100)
+    value = 100;
+
+  if (value == lastValue)
+    return; // No update needed
+
+  // Erase previous needle
+  float sdegOld = map(lastValue, -10, 110, -150, -30);
+  float sxOld = cos(sdegOld * DEG_TO_RAD);
+  float syOld = sin(sdegOld * DEG_TO_RAD);
+  float txOld = tan((sdegOld + 90) * DEG_TO_RAD);
+  int osxOld = M_SIZE * (sxOld * 98 + 120);
+  int osyOld = M_SIZE * (syOld * 98 + 140);
+  tft.drawLine(
+      M_SIZE * (120 + 20 * last_tx),
+      M_SIZE * (140 - 20),
+      osxOld,
+      osyOld,
+      TFT_WHITE);
+  // Redraw text
+  tft.setTextColor(TFT_BLACK);
+  tft.drawCentreString("Tuning", 160, 90, 4);
+  // Draw new needle
+  float sdeg = map(value, -10, 110, -150, -30);
+  float sx = cos(sdeg * DEG_TO_RAD);
+  float sy = sin(sdeg * DEG_TO_RAD);
+  float tx = tan((sdeg + 90) * DEG_TO_RAD);
+  int osx = M_SIZE * (sx * 98 + 120);
+  int osy = M_SIZE * (sy * 98 + 140);
+  tft.drawLine(
+      M_SIZE * (120 + 20 * tx),
+      M_SIZE * (140 - 20),
+      osx,
+      osy,
+      TFT_BLACK);
+
+  lastValue = value;
+  last_tx = tx;
+}
+
+void meterStartUpAnimation()
+{
+  const int steps = 180; // More steps = smoother animation
+  for (int i = 0; i <= steps; ++i)
+  {
+    // Forward movement: 0 → 100
+    float angle = (float)i / steps * PI; // 0 to π radians
+    int value = (int)(sin(angle) * 100); // sin(0 to π): 0 to 1 to 0
+    plotNeedle(value);
+    refreshVUmeter(value);
+    delay(5); // Adjust speed of animation
+  }
+}
+
+String formatFrequencyWithDots(unsigned freq)
+{
+  String s = String(freq);
+  int len = s.length();
+
+  // Insert dots every 3 digits from the right
+  for (int i = len - 3; i > 0; i -= 3)
+  {
+    s = s.substring(0, i) + "." + s.substring(i);
+  }
+
+  return s;
+}
+
+void displayFrequAtBottom(unsigned long freq, int x, int y)
+{
+
+  String s = String(freq);
+  int len = s.length();
+
+  // Insert dots every 3 digits from the right
+  for (int i = len - 3; i > 0; i -= 3)
+  {
+    s = s.substring(0, i) + "." + s.substring(i);
+  }
+  // tft.setFreeFont(&FreeMonoBold9pt7b);
+  tft.setTextColor(TFT_WHITE);
+  if (x == 1)
+  {
+    tft.setTextDatum(TL_DATUM); // Top-Left alignment
+    tft.drawString(s + " Hz", 5, y);
+  }
+  else
+  {
+    tft.setTextDatum(TR_DATUM); // Top-Right alignment
+    tft.drawString(s + " Hz", 315, y);
+  }
+}
+void displayMessageAtBottom(String message, int y)
+{
+  int rectHeight = 16; // Adjust based on font size
+  int rectWidth = 320; // Full screen width
+
+  // Clear the previous message area
+  tft.fillRect(0, y, rectWidth, rectHeight, TFT_BLACK); // Use your background color
+
+  // Set text color and font as needed
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);   // Text color and background color (optional)
+  tft.drawCentreString(message, 160, y, 2); // 160 is center X for a 320 px wide display
+}
+int readAveragedAdc(int pin, int samples)
+{
+  uint32_t sum = 0;
+  for (int i = 0; i < samples; i++)
+  {
+    sum += analogRead(pin);
+    delayMicroseconds(50);
+  }
+  return sum / samples;
+}
+
+void setFrequencyInMhz(float freqMHz)
+{
+  Serial.println("⚙️ Setting frequency on SI5351...");
+
+  // Power down CLK0 before reconfiguring
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  Serial.println("🔌 CLK0 powered OFF");
+
+  // Convert MHz to Hz
+  uint64_t freq = (uint64_t)(freqMHz * 1e6);
+  Serial.print("📡 Target frequency: ");
+  Serial.print(freqMHz, 6); // show with precision
+  Serial.println(" MHz");
+
+  // Set frequency (multiply by 100 for 100ths of Hz resolution)
+  si5351.set_freq(freq * 100ULL, SI5351_CLK0);
+  Serial.println("📶 Frequency set successfully");
+
+  // Power on CLK0
+  si5351.set_clock_pwr(SI5351_CLK0, 1);
+  Serial.println("✅ SI5351 CLK0 powered ON");
+}
+
+unsigned long findResonanceFrequency()
+{
+  bool verbose = false;
+
+  const unsigned long coarseStartHz = 9000000UL;
+  const unsigned long coarseEndHz   = 20000000UL;
+  const unsigned long coarseStepHz  = 50000UL;
+
+  const unsigned long fineSpanHz = 400000UL;
+  const unsigned long fineStepHz = 1000UL;
+   int fineAdcSamples = 1;
+
+  int frequChangeDelay = 1;
+  int sweepCounter = 0;
+  int minAdcValue = 4096;
+
+  unsigned long tempFreq[MAX_SWEEP_POINTS];
+  int tempAdc[MAX_SWEEP_POINTS];
+  int tempCount = 0;
+
+  si5351.set_clock_pwr(SI5351_CLK0, 1);
+
+  // === COARSE SWEEP ===
+  if (verbose) Serial.println("---COARSE_START---");
+
+  for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
+  {
+    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    delay(frequChangeDelay);
+    int adcValue = readAveragedAdc(ADC_PIN, 1);
+    //Serial.printf("COARSE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
+
+    if (tempCount < MAX_SWEEP_POINTS) {
+      tempFreq[tempCount] = freqHz;
+      tempAdc[tempCount] = adcValue;
+      tempCount++;
+
+      if (adcValue < minAdcValue) {
+        minAdcValue = adcValue;
+      }
+    }
+  }
+
+  coarseSweepCount = tempCount;
+  coarsePeakAdc = 0;
+  coarsePeakFreq = 0;
+
+  for (int i = 0; i < tempCount; i++) {
+    coarse_sweep_frequ[i] = tempFreq[i];
+    coarse_sweep_adc[i] = tempAdc[i];
+
+    if (tempAdc[i] > coarsePeakAdc) {
+      coarsePeakAdc = tempAdc[i];
+      coarsePeakFreq = tempFreq[i];
+    }
+  }
+
+  if (verbose) {
+    Serial.printf("🟨 COARSE_MAX_ADC: %d at %lu Hz\n", coarsePeakAdc, coarsePeakFreq);
+    Serial.println("---COARSE_END---");
+  }
+
+  // === FINE SWEEP ===
+  if (verbose) Serial.println("---FINE_START---");
+fineAdcSamples = 3;
+  tempCount = 0;
+  for (int i = 0; i < MAX_SWEEP_POINTS; i++) {
+    tempFreq[i] = 0;
+    tempAdc[i] = 0;
+  }
+
+  unsigned long fineStartHz = coarsePeakFreq - fineSpanHz/2;
+  unsigned long fineStopHz  = coarsePeakFreq + fineSpanHz/2;
+
+  //Serial.printf("🟨 FINE SWEEP from %lu to %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, fineStepHz);
+
+  for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += fineStepHz)
+  {
+    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    delay(frequChangeDelay);
+    int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
+    Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
+
+    if (tempCount < MAX_SWEEP_POINTS) {
+      tempFreq[tempCount] = freqHz;
+      tempAdc[tempCount] = adcValue;
+      tempCount++;
+
+      if (adcValue < minAdcValue) {
+        minAdcValue = adcValue;
+      }
+    }
+  }
+
+  fineSweepCount = tempCount;
+  finePeakAdc = 0;
+  finePeakFreq = 0;
+
+  for (int i = 0; i < tempCount; i++) {
+    fine_sweep_frequ[i] = tempFreq[i];
+    fine_sweep_adc[i] = tempAdc[i];
+
+    if (tempAdc[i] > finePeakAdc) {
+      finePeakAdc = tempAdc[i];
+      finePeakFreq = tempFreq[i];
+    }
+  }
+
+  if (verbose) {
+    Serial.printf("🟨 FINE_MAX_ADC: %d at %lu Hz\n", finePeakAdc, finePeakFreq);
+    Serial.println("---FINE_END---");
+  }
+
+  // Summary
+  if (verbose) {
+    Serial.println("---SUMMARY---");
+    Serial.printf("🟨 NOISE_FLOOR: %d\n", minAdcValue);
+    Serial.printf("🟨 DELTA: %d\n", finePeakAdc - minAdcValue);
+    Serial.printf("🟨 FINAL RESONANCE FREQUENCY: %lu Hz\n", finePeakFreq);
+    Serial.println("SWEEP_DONE");
+  }
+
+  resonanceFrequ = finePeakFreq;
+  bestAdcAtSweep = finePeakAdc;
+  noiseFloor = minAdcValue;
+
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  delay(2000);
+  return resonanceFrequ;
+}
+
+// RELATED TO CW BEACON
+
+void cw_string_proc(String str)
+{
+  for (uint8_t j = 0; j < str.length(); j++)
+  {
+    cw_char_proc(str[j]);
+  }
+}
+void cw_char_proc(char m)
+{
+  String s;
+
+  if (m == ' ')
+  {
+    word_space();
+    currentDisplayMessage += ' ';
+    updateDisplay();
+    return; // Correct to return on space
+  }
+
+  if (m > 96 && m < 123)
+    m -= 32; // Convert to uppercase
+
+  // Morse code lookup
+  switch (m)
+  {
+  case 'A':
+    s = ".-#";
+    break;
+  case 'B':
+    s = "-...#";
+    break;
+  case 'C':
+    s = "-.-.#";
+    break;
+  case 'D':
+    s = "-..#";
+    break;
+  case 'E':
+    s = ".#";
+    break;
+  case 'F':
+    s = "..-.#";
+    break;
+  case 'G':
+    s = "--.#";
+    break;
+  case 'H':
+    s = "....#";
+    break;
+  case 'I':
+    s = "..#";
+    break;
+  case 'J':
+    s = ".---#";
+    break;
+  case 'K':
+    s = "-.-#";
+    break;
+  case 'L':
+    s = ".-..#";
+    break;
+  case 'M':
+    s = "--#";
+    break;
+  case 'N':
+    s = "-.#";
+    break;
+  case 'O':
+    s = "---#";
+    break;
+  case 'P':
+    s = ".--.#";
+    break;
+  case 'Q':
+    s = "--.-#";
+    break;
+  case 'R':
+    s = ".-.#";
+    break;
+  case 'S':
+    s = "...#";
+    break;
+  case 'T':
+    s = "-#";
+    break;
+  case 'U':
+    s = "..-#";
+    break;
+  case 'V':
+    s = "...-#";
+    break;
+  case 'W':
+    s = ".--#";
+    break;
+  case 'X':
+    s = "-..-#";
+    break;
+  case 'Y':
+    s = "-.--#";
+    break;
+  case 'Z':
+    s = "--..#";
+    break;
+  case '1':
+    s = ".----#";
+    break;
+  case '2':
+    s = "..---#";
+    break;
+  case '3':
+    s = "...--#";
+    break;
+  case '4':
+    s = "....-#";
+    break;
+  case '5':
+    s = ".....#";
+    break;
+  case '6':
+    s = "-....#";
+    break;
+  case '7':
+    s = "--...#";
+    break;
+  case '8':
+    s = "---..#";
+    break;
+  case '9':
+    s = "----.#";
+    break;
+  case '0':
+    s = "-----#";
+    break;
+  case '?':
+    s = "..--..#";
+    break;
+  case '=':
+    s = "-...-#";
+    break;
+  case ',':
+    s = "--..--#";
+    break;
+  case '/':
+    s = "-..-.#";
+    break;
+  default:
+    return; // Ignore unknown characters
+  }
+
+  // Add character to display and update TFT (but don’t return here!)
+  currentDisplayMessage += m;
+  updateDisplay();
+
+  // Now process and transmit the Morse sequence fully
+  for (uint8_t i = 0; i < s.length(); i++)
+  {
+    switch (s[i])
+    {
+    case '.':
+      di();
+      break;
+    case '-':
+      dah();
+      break;
+    case '#':
+      char_space();
+      return; // End of Morse sequence for this character
+    }
+  }
+}
+void di()
+{
+  cw(true); // TX di
+  delay(cwDitDurationMs);
+
+  cw(false); // stop TX di
+  delay(cwDitDurationMs);
+}
+void dah()
+{
+  cw(true); // TX dah
+  delay(3 * cwDitDurationMs);
+
+  cw(false); // stop TX dah
+  delay(cwDitDurationMs);
+}
+void char_space()
+{                             // 3x, pause between letters
+  delay(2 * cwDitDurationMs); // 1x from end of character + 2x from the beginning of new character
+}
+void word_space()
+{                             // 7x, pause between words
+  delay(6 * cwDitDurationMs); // 1x from end of the word + 6x from the beginning of new word
+}
+void cw(bool state)
+{
+  if (state)
+  {
+    si5351.output_enable(SI5351_CLK0, 1);
+  }
+  else
+  {
+    si5351.output_enable(SI5351_CLK0, 0);
+  }
+}
+void updateDisplay()
+{
+
+  if (touchInterrupt)
+  {
+    touchInterrupt = false;
+
+    uint16_t touched = cap.touched();
+    for (uint8_t i = 0; i < 12; i++)
+    {
+      if (touched & (1 << i))
+      {
+        char key = keymapFKPF[i];
+        if (key == '0')
+        {
+          Serial.println("🆗 Key 0 pressed!");
+          esp_restart(); // XXXXXXXXXXXXXXX TO BE IMPROVED
+          stopCWbeacon = true;
+          PowerSImoduleOFF();
+          displayMenu();
+          modeOfOperation = 6;
+          return;
+        }
+      }
+    }
+  }
+
+  tft.setTextFont(4);
+  int charWidth = tft.textWidth("M", 2); // Estimate fixed char width
+
+  // Get the last character added to the message
+  char lastChar = currentDisplayMessage[currentDisplayMessage.length() - 1];
+
+  // Draw only the new character at the current position
+  tft.drawChar(cwBeaconMessageCursorX, cwBeaconMessageCursorY, lastChar, TFT_WHITE, TFT_NAVY, 2);
+
+  // Advance the cursor
+  cwBeaconMessageCursorX += charWidth + 2;
+
+  // Handle line wrap if needed (optional)
+  if (cwBeaconMessageCursorX >= (320 - charWidth))
+  {
+    cwBeaconMessageCursorX = 10;
+    cwBeaconMessageCursorY += tft.fontHeight(2) + 4;
+    if (cwBeaconMessageCursorY >= 240)
+    { // If we reach the bottom, reset to starting Y
+      cwBeaconMessageCursorY = 220;
+      clearDisplayLine();
+    }
+  }
+}
+void clearDisplayLine()
+{
+
+  currentDisplayMessage = "";
+  cwBeaconMessageCursorX = 10;
+  cwBeaconMessageCursorY = 156;
+
+  tft.fillRect(0, cwBeaconMessageCursorY, 320, 240, TFT_NAVY);
+}
+
+// keypad
+// related to keypad
+
+void initKeypad()
+{
+  pinMode(IRQ_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(IRQ_PIN), handleTouchIRQ, FALLING);
+  if (!cap.begin(0x5A))
+  {
+    Serial.println("❌ KeyPad error");
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawCentreString("KEYPAD ERROR", tft.width() / 2, tft.height() / 2, 4);
+    while (1)
+      ;
+  }
+  else
+  {
+    Serial.println("✅ MPR121 + TFT Ready");
+  }
+}
+
+void IRAM_ATTR handleTouchIRQ()
+{
+  touchInterrupt = true;
+}
+
+String formatFrequencyWithDotsFKPF(const String &s)
+{
+  String result = "";
+  int len = s.length();
+  for (int i = 0; i < len; i++)
+  {
+    if (i > 0 && ((len - i) % 3 == 0))
+    {
+      result += '.';
+    }
+    result += s[i];
+  }
+  return result;
+}
+
+bool isValidFrequency(const String &s)
+{
+  if (s.length() == 0)
+    return false;
+  uint32_t val = s.toInt();
+  return (val >= 3000000 && val <= 30000000);
+}
+
+void displayFrequencyFKPF()
+{
+  String formatted = formatFrequencyWithDotsFKPF(freqStrFKPF);
+  tft.setTextSize(1);
+  // Overwrite old string in black
+  if (lastFormattedFKPF.length() > 0)
+  {
+    tft.setTextColor(TFT_BLACK, TFT_BLACK);
+    tft.drawRightString(lastFormattedFKPF, tft.width() - RIGHT_MARGIN_FKPF, BASELINE_Y_FKPF, 7);
+  }
+
+  // Draw new string in green
+  tft.setTextColor(TFT_GOLD, TFT_BLACK);
+  tft.drawRightString(formatted, tft.width() - RIGHT_MARGIN_FKPF, BASELINE_Y_FKPF, 7);
+
+  lastFormattedFKPF = formatted;
+}
+
+void handleKey(char key)
+{
+  if (key >= '0' && key <= '9')
+  {
+    // 🚫 Prevent starting with 0
+    if (freqStrFKPF.length() == 0 && key == '0')
+      return;
+
+    // 🚫 Prevent more than 8 digits
+    if (freqStrFKPF.length() >= 8)
+      return;
+
+    // 🚫 Prevent numbers > 30,000,000
+    String test = freqStrFKPF + key;
+    if (test.toInt() > 30000000)
+      return;
+
+    freqStrFKPF += key;
+    displayFrequencyFKPF();
+  }
+  else if (key == '*')
+  {
+    if (freqStrFKPF.length() > 0)
+    {
+      freqStrFKPF.remove(freqStrFKPF.length() - 1);
+      displayFrequencyFKPF();
+    }
+  }
+  else if (key == '#')
+  {
+    if (isValidFrequency(freqStrFKPF))
+    {
+      Serial.print("✅ Frequency entered: ");
+      Serial.println(freqStrFKPF.toInt());
+      selectedFrequencyViaKeypad = freqStrFKPF.toInt();
+      modeOfOperation = selectedModeOfOperation;
+      return;
+      // for debug only
+      tft.setTextColor(TFT_GOLD);
+      tft.drawString("Freq OK", tft.width() / 2, BASELINE_Y_FKPF + 100);
+      delay(1000);
+      tft.setTextColor(TFT_BLACK);
+      tft.drawString("Freq OK", tft.width() / 2, BASELINE_Y_FKPF + 100);
+    }
+    else
+    {
+      Serial.println("❌ Invalid frequency");
+    }
+  }
+}
+
+void rebootESP()
+{
+  tft.fillScreen(TFT_NAVY);
+  tft.setFreeFont(&Orbitron_Light_32);
+  tft.setTextSize(2);
+  for (int i = 0; i < 5; i++)
+  {
+    tft.setTextColor(TFT_YELLOW, TFT_NAVY);
+    tft.drawCentreString("Rebooting", 160, 120 - 24, 4);
+    delay(150);
+    tft.setTextColor(TFT_NAVY, TFT_NAVY);
+    tft.drawCentreString("Rebooting", 160, 120 - 24, 4);
+    delay(150);
+  }
+  esp_restart();
+}
+
+void PowerSImoduleOFF()
+{
+  si5351.set_clock_pwr(SI5351_CLK0, 0); // Power OFF
+  Serial.println("🔌 SI5351 CLK0 powered OFF");
+}
+
+void displayMenu()
+{
+  tft.fillScreen(TFT_NAVY);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.fillRect(0, 0, 320, 30, TFT_BLACK);
+  tft.drawCentreString("MLA Toolbox Menu", 160, 4, 4);
+  tft.setTextColor(TFT_WHITE, TFT_NAVY);
+  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
+  int x = 7;                           // Left margin
+  int y = 90;
+  int lineGap = 24;
+  y = 40;
+  tft.drawString("Select Operating mode:", x, y);
+  y += lineGap + 5;
+  tft.drawString("[1] MLA Tuning", x, y);
+  y += lineGap;
+  tft.drawString("[2] WSPR Transmitter", x, y);
+  y += lineGap;
+  tft.drawString("[3] CW Beacon", x, y);
+  y += lineGap;
+  tft.drawString("[4] VFO", x, y);
+  y += lineGap;
+  tft.drawString("[5] Diagnostic", x, y);
+  y += lineGap;
+  tft.drawString("[6] About", x, y);
+  y += lineGap;
+  tft.drawString("[0] Reboot", x, y);
+  tft.setTextFont(1); // Select FONT1 (Adafruit 8px)
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_NAVY);
+  tft.drawRightString(String("Version: ") + VERSION, 300, 220, 1);
+}

@@ -1,0 +1,225 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <Adafruit_MPR121.h>
+#include <TFT_eSPI.h>
+
+#define IRQ_PIN 17
+
+Adafruit_MPR121 cap = Adafruit_MPR121();
+TFT_eSPI tft = TFT_eSPI();
+volatile bool touchInterrupt = false;
+String lastFormattedFKPF = "";
+
+const char keymapFKPF[12] = {
+    '*', '7', '4', '1',
+    '0', '8', '5', '2',
+    '#', '9', '6', '3'};
+
+String freqStrFKPF = "";
+char lastKeyFKPF = 0;
+char selectedNumber = 0;      // Stores last valid selection (1–5)
+
+
+
+
+// 🆕 Long-press tracking
+unsigned long starPressedTimeFKPF = 0;
+bool starBeingHeldFKPF = false;
+
+// TFT layout
+#define RIGHT_MARGIN_FKPF 10
+#define BASELINE_Y_FKPF 50
+
+void IRAM_ATTR handleTouchIRQ();
+
+
+void initTFT()
+{
+    tft.begin();
+    tft.setRotation(2);
+    tft.fillScreen(TFT_BLACK);
+#ifdef TFT_BL
+    pinMode(TFT_BL, OUTPUT);
+    digitalWrite(TFT_BL, HIGH);
+#endif
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.setTextDatum(BR_DATUM); // Bottom-right alignment
+}
+
+void initKeypad()
+{
+    pinMode(IRQ_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(IRQ_PIN), handleTouchIRQ, FALLING);
+    if (!cap.begin(0x5A))
+    {
+        Serial.println("❌ KeyPad error");
+        tft.setTextColor(TFT_RED, TFT_BLACK);
+        tft.drawCentreString("KEYPAD ERROR", tft.width() / 2, tft.height() / 2, 4);
+        while (1)
+            ;
+    }
+    else
+    {
+        Serial.println("✅ MPR121 + TFT Ready");
+    }
+}
+
+
+
+
+String formatFrequencyWithDotsFKPF(const String &s)
+{
+    String result = "";
+    int len = s.length();
+    for (int i = 0; i < len; i++)
+    {
+        if (i > 0 && ((len - i) % 3 == 0))
+        {
+            result += '.';
+        }
+        result += s[i];
+    }
+    return result;
+}
+
+bool isValidFrequency(const String &s)
+{
+    if (s.length() == 0)
+        return false;
+    uint32_t val = s.toInt();
+    return (val >= 3000000 && val <= 30000000);
+}
+
+void displayFrequencyFKPF()
+{
+    String formatted = formatFrequencyWithDotsFKPF(freqStrFKPF);
+    tft.setTextSize(1);
+    // Overwrite old string in black
+    if (lastFormattedFKPF.length() > 0)
+    {
+        tft.setTextColor(TFT_BLACK, TFT_BLACK);
+        tft.drawRightString(lastFormattedFKPF, tft.width() - RIGHT_MARGIN_FKPF, BASELINE_Y_FKPF, 7);
+    }
+
+    // Draw new string in green
+    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    tft.drawRightString(formatted, tft.width() - RIGHT_MARGIN_FKPF, BASELINE_Y_FKPF, 7);
+
+    lastFormattedFKPF = formatted;
+}
+
+void handleKey(char key)
+{
+    if (key >= '0' && key <= '9')
+    {
+        // 🚫 Prevent starting with 0
+        if (freqStrFKPF.length() == 0 && key == '0')
+            return;
+
+        // 🚫 Prevent more than 8 digits
+        if (freqStrFKPF.length() >= 8)
+            return;
+
+        // 🚫 Prevent numbers > 30,000,000
+        String test = freqStrFKPF + key;
+        if (test.toInt() > 30000000)
+            return;
+
+        freqStrFKPF += key;
+        displayFrequencyFKPF();
+    }
+    else if (key == '*')
+    {
+        if (freqStrFKPF.length() > 0)
+        {
+            freqStrFKPF.remove(freqStrFKPF.length() - 1);
+            displayFrequencyFKPF();
+        }
+    }
+    else if (key == '#')
+    {
+        if (isValidFrequency(freqStrFKPF))
+        {
+            Serial.print("✅ Frequency entered: ");
+            Serial.println(freqStrFKPF.toInt());
+            tft.setTextDatum(MC_DATUM);
+            tft.setTextSize(2);
+            tft.setTextColor(TFT_GOLD);
+            tft.drawString("Freq OK", tft.width() / 2, BASELINE_Y_FKPF + 100);
+            delay(1000);
+            tft.setTextColor(TFT_BLACK);
+            tft.drawString("Freq OK", tft.width() / 2, BASELINE_Y_FKPF + 100);
+
+            // Optional clear after entry:
+            // freqStrFKPF = "";
+            // lastFormattedFKPF = "";
+            // displayFrequencyFKPF();
+        }
+        else
+        {
+            Serial.println("❌ Invalid frequency");
+        }
+    }
+}
+
+void IRAM_ATTR handleTouchIRQ()
+{
+    
+ touchInterrupt = true;
+}
+
+void setup()
+{
+    Serial.begin(115200);
+    delay(1000);
+
+    initTFT();
+    initKeypad();
+
+    tft.setTextSize(2);
+    tft.drawCentreString("Enter Frequency", tft.width() / 2, 15, 2);
+    displayFrequencyFKPF();
+}
+
+
+char lastKeyFKPF = 0;
+
+void loop()
+{
+    if (touchInterrupt)
+    {
+        touchInterrupt = false;
+
+        uint16_t touched = cap.touched();
+        for (uint8_t i = 0; i < 12; i++)
+        {
+            if (touched & (1 << i))
+            {
+                char key = keymapFKPF[i];
+                if (key != lastKeyFKPF)
+                {
+                    lastKeyFKPF = key;
+
+                    if (key >= '1' && key <= '5')
+                    {
+                        Serial.print("🎯 Valid key pressed: ");
+                        Serial.println(key);
+                        // 👉 You can add your action for keys 1–5 here
+                    }
+                    else
+                    {
+                        Serial.print("🚫 Ignored key: ");
+                        Serial.println(key);
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Reset key tracking when no key is touched
+    if (cap.touched() == 0)
+    {
+        lastKeyFKPF = 0;
+    }
+}
