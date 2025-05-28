@@ -1,5 +1,11 @@
 // ################################################################################################
 // Includes
+#ifdef MYCONFIG_H_EXISTS
+#include <myconfig.h> // Only include myconfig.h if it exists
+#else
+#include <config.h> // Include config.h if configDS.h is not present
+#endif
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <TFT_eSPI.h> //TFT graphics library
@@ -15,16 +21,53 @@
 #include <Adafruit_MPR121.h>
 //------------------------------------
 #include <PNGdec.h> //PNG image decoding library
-// #define LOAD_GFXFF  // This must be defined to use FreeFonts (GFX fonts)
 
 #define VERSION "2.0"
 
 #define IRQ_PIN 17
 
+#define MAX_SWEEP_POINTS 405
+
+unsigned long coarse_sweep_frequ[MAX_SWEEP_POINTS];
+int coarse_sweep_adc[MAX_SWEEP_POINTS];
+int coarseSweepCount = 0;
+
+unsigned long fine_sweep_frequ[MAX_SWEEP_POINTS];
+int fine_sweep_adc[MAX_SWEEP_POINTS];
+int fineSweepCount = 0;
+
+unsigned long resonanceFrequ = 0;
+int bestAdcAtSweep = 0;
+int noiseFloor = 4096; // initial max ADC value (12-bit ADC max 4095)
+
+// Global resonance peak results for both coarse and fine sweeps
+int coarsePeakFreq = 0;
+int coarsePeakAdc = 0;
+unsigned long finePeakFreq = 0;
+unsigned long finePeakAdc = 0;
+
 Adafruit_MPR121 cap = Adafruit_MPR121();
 // ################################################################################################
 // Prototype declarations
 // related to WSPR
+// ✅ WSPR Band Definitions (Hz) from official sub-band plan
+// https://www.wsprnet.org/drupal/sites/wsprnet.org/files/wspr-qrg.pdf
+const char *WSPRbandNames[] = {
+    "80m", "40m", "30m", "20m", "17m", "15m", "12m", "10m"};
+
+const unsigned long WSPRbandStart[] = {
+    3570000, 7040000, 10140100, 14097000, 18106000, 21096000, 24926000, 28126000};
+
+const unsigned long WSPRbandEnd[] = {
+    3570200, 7040200, 10140300, 14097200, 18106200, 21096200, 24926200, 28126200};
+
+const byte numWSPRbands = sizeof(WSPRbandNames) / sizeof(WSPRbandNames[0]);
+
+// ✅ Returns a randomized safe WSPR transmit frequency for a given band index
+unsigned long setRandomWSPRfrequency(byte bandIndex);
+void displaySelecetdBandInformation(byte bandIndex);
+//----------------------------------------------------------------------------------------
+
 void printVersionBox(const String &text, String version);
 void initTFT();
 void mountAndListSPIFFS(uint8_t levels = 255, bool listContent = true);
@@ -46,6 +89,7 @@ String convertPosixToHHMMSS(time_t posixTime);
 void TX_ON_counter_core0(void *parameter);
 std::string getBandFromFrequency(uint32_t frequency);
 void startAPMode();
+void displayWSPRmenu();
 
 // related to tuner
 void plotNeedle(int value);
@@ -58,13 +102,20 @@ void displayFrequAtBottom(unsigned long freq, int x, int y);
 int readAveragedAdc(int pin, int samples);
 void setFrequencyInMhz(float freqMHz);
 unsigned long findResonanceFrequency();
+bool initSI5351();
+byte selectedBandIndex;
 
 String formatFrequencyWithDots(unsigned freq);
+
+// related to web server
+const char* hostname = "mlatoolbox";
+
+
 
 // related to keypad
 void initKeypad();
 void IRAM_ATTR handleTouchIRQ();
-void displayMenu();
+void displayMainMenu();
 int selectedModeOfOperation;
 volatile bool touchInterrupt = false;
 String lastFormattedFKPF = "";
@@ -95,23 +146,14 @@ void displayFrequencyFKPF();
 void handleKey(char key);
 
 // Helpers
-void rebootESP();
+void displayMessageAndReboot();
+void displayAboutMessage();
 
 // Global Variables for meter
 #define M_SIZE 1.3333   // Meter size scale factor for rotation(1)
 #define TFT_GREY 0x5AEB // Custom grey color for background
 float ltx = 0;
 uint16_t osx = M_SIZE * 120, osy = M_SIZE * 120;
-// === SWEEP PARAMETERS ===
-#define F_START_MHZ 10.500
-#define F_END_MHZ 25.000
-#define F_STEP_HZ 200000
-
-int range = 0;
-int noiseFloor = 0;
-
-int bestAdcAtSweep = 0;
-long unsigned resonanceFrequ = 0;
 
 #define ADC_PIN 34
 // RELATED TO CW BEACON
@@ -157,7 +199,6 @@ NTPClient timeClient(ntpUDP, "time-a-g.nist.gov");
 
 int modeOfOperation = 0;
 
-// Constants for WSPR band start frequencies (in Hz)
 const unsigned long long WSPRbandStartFrequencies[] = {
     356860000ULL,  // 80 m -> 3.568.600 Hz
     528720000ULL,  // 60 m -> 5.287.200 Hz
@@ -213,8 +254,7 @@ uint8_t dbm = 24;
 // WSPR general settings
 bool warmingup = false;
 unsigned long long WSPR_TX_operatingFrequ;
-unsigned long long TX_referenceFrequ;
-unsigned long long calibrationFrequ = 1400000000ULL;
+unsigned long long TX_referenceFrequ = 0;
 TaskHandle_t txCounterTaskHandle = NULL;
 
 #define TONE_SPACING 146 // ~1.46 Hz
@@ -246,7 +286,7 @@ void setup()
 
   displayPNGfromSPIFFS("splash.png", 0); // will stay on enough time due to next steps
 
-  // Initialize Preferences storage with namespace "settings" for read-write access
+  // Initialize Preferences storage w
   preferences.begin("settings", false);
   // Check if WiFi credentials are stored in preferences
   String storedSSID = preferences.getString("ssid", "");
@@ -257,13 +297,15 @@ void setup()
     Serial.println("No stored WiFi credentials found.");
     Serial.println("ESP will enter in AP mode");
     APmode = true;
-    storedSSID = "MESH";
-    storedPassword = "Nestle2010Nestle";
+    storedSSID = WIFI_SSID;
+    storedPassword = WIFI_PASSWORD;
+
     // Assign stored credentials to WiFi credentials
     ssid = storedSSID.c_str();
     password = storedPassword.c_str();
-    APmode = false;
+    APmode = true;
   }
+
   else
   {
     Serial.println("Stored WiFi credentials found:");
@@ -294,27 +336,10 @@ void setup()
     // Update NTP time
     updateNTPTime();
 
-    // 🛠️ Initialize the Si5351 Clock Generator
-    Serial.println("\n📡 Setting up Si5351 module...");
-    si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+    initSI5351();
 
-    // 🔧 Apply Calibration Factor
-    Serial.print("🔧 Applying Calibration Factor: ");
-    Serial.println(cal_factor);
-    si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
-
-    // 🎯 Set Desired Reference Frequency for TX Operation
-    Serial.print("📶 Setting TX Reference Frequency: ");
-    Serial.print(TX_referenceFrequ);
-    Serial.println(" Hz");
-    si5351.set_freq(TX_referenceFrequ, SI5351_CLK0); // Set frequency for CLK0 output
-
-    // ⚡ Configure Drive Strength and Power State
-    Serial.println("💪 Setting Drive Strength: 8 mA");
-    si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
-
-    Serial.println("🔌 Powering down CLK0 output initially.");
-    si5351.set_clock_pwr(SI5351_CLK0, 0); // Power down CLK0 initially (0 = power off)
+    // Serial.println("🔌 Powering down CLK0 output initially.");
+    // si5351.set_clock_pwr(SI5351_CLK0, 0); // Power down CLK0 initially (0 = power off)
   }
   else
   {
@@ -419,47 +444,12 @@ void setup()
   modeOfOperation = 3;
   delay(0);
 
-  // WSPR
-  // Title Box
-  tft.fillScreen(TFT_NAVY);     // Background navy blue
-  tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
-  tft.fillRect(0, 0, 320, 30, TFT_DARKGREY);
-  tft.drawCentreString("WSPR MODE", 160, 4, 4);
-  tft.setTextColor(TFT_WHITE);         // Text color white, no background fill
-  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
 
-  y = 33;
-  lineGap = 18;
-  tft.drawString("📡 Select WSPR Band:", x, y);
-  y += lineGap + 5;
-
-  tft.drawString("[1] 80 m  (3.592.600 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[2] 40 m  (7.038.600 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[3] 30 m (10.140.200 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[4] 20 m (14.097.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[5] 17 m (18.106.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[6] 15 m (21.096.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[7] 12 m (24.926.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[8] 10 m (28.124.600 Hz)", x, y);
-  y += lineGap + 10;
-
-  tft.drawString("Press [0] to Quit", x, y);
-  delay(0);
-  displayPNGfromSPIFFS("world.png", 1000);
-  displayPNGfromSPIFFS("eur.png", 1000);
 */
   // MENU
-  displayMenu();
-
-  modeOfOperation = 6;
+  displayMainMenu();
 }
+
 // ################################################################################################
 // Loop Function
 
@@ -474,45 +464,32 @@ void loop()
   // [6] About
   // [0] Restart
 
-  // [0] Restart
-  if (modeOfOperation == 0)
-  {
-    rebootESP();
-  }
   // [1] Tuning mode
   if (modeOfOperation == 1)
 
   {
-    //drawAnalogMeter();
 
+    // drawAnalogMeter();
+    tft.fillScreen(TFT_BLACK);
     // meterStartUpAnimation();
 
-    //displayMessageAtBottom("Determining Current Resonance Frequency", 200);
-    //displayMessageAtBottom("Please Wait.....", 220);
-    //delay(5000);
+    // displayMessageAtBottom("Determining Current Resonance Frequency", 200);
+    // displayMessageAtBottom("Please Wait.....", 220);
+    // delay(5000);
     resonanceFrequ = findResonanceFrequency();
-
-    String s = String(resonanceFrequ);
-    int len = s.length();
-
-    // Insert dots every 3 digits from the right
-    for (int i = len - 3; i > 0; i -= 3)
-    {
-      s = s.substring(0, i) + "." + s.substring(i);
-    }
 
     // Clear the previous message area
     tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
     tft.setTextColor(TFT_WHITE, TFT_BLACK);          // Foreground and background color
 
-    tft.drawCentreString(s, 160, 180, 7);
+    tft.drawCentreString(formatFrequencyWithDots(resonanceFrequ), 160, 180, 7);
     // delay(3000);
-    //tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
-    //tft.drawCentreString("Enter Target Frequency", 160, 175, 4);
-    ///tft.drawCentreString("and press #", 160, 210, 4);
+    // tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+    // tft.drawCentreString("Enter Target Frequency", 160, 175, 4);
+    /// tft.drawCentreString("and press #", 160, 210, 4);
 
-    delay(0);
-    tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+    // delay(0);
+    // tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
 
     //}
     /*
@@ -553,6 +530,7 @@ void loop()
         */
     return;
   }
+
   // [2] WSPR mode
   if (modeOfOperation == 2)
   {
@@ -579,8 +557,7 @@ void loop()
     Serial.println(convertPosixToHHMMSS(nextPosixTxTime));
     TX_referenceFrequ = WSPRbandStartFrequencies[4];
 
-    Serial.print("TX_referenceFrequ: ");
-    Serial.println(formatFrequencyWithDots(TX_referenceFrequ / 100));
+    displaySelecetdBandInformation(selectedBandIndex);
 
     uint64_t initialRemainingSeconds = nextPosixTxTime - currentEpochTime;
     Serial.print("Next transmission in ");
@@ -616,6 +593,7 @@ void loop()
     Serial.print("\n");
     return;
   }
+
   // [3] CW Beacon mode
   if (modeOfOperation == 3)
   {
@@ -650,6 +628,7 @@ void loop()
       delay(5000); // Duration of the pause at the end after the long signal - in milliseconds
     }
   }
+
   // [4] VFO
   if (modeOfOperation == 4)
   {
@@ -659,40 +638,83 @@ void loop()
       tft.fillScreen(TFT_NAVY);
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
       tft.fillRect(0, 0, 320, 30, TFT_BLACK);
-      tft.drawCentreString("VFO", 160, 4, 4);
-      tft.setTextColor(TFT_RED, TFT_NAVY);
-      tft.setFreeFont(&FreeSansBold12pt7b);
-      tft.drawCentreString("TX ON", 160, 45, 1);
-      tft.drawRoundRect(10, 80, 300, 68, 5, TFT_DARKGREY);
-      tft.fillRoundRect(9, 79, 302, 70, 6, TFT_BLACK);
-      tft.drawRoundRect(9, 79, 302, 70, 6, TFT_LIGHTGREY);
+      tft.drawCentreString("VFO is ON", 160, 4, 4);
+      // tft.setTextColor(TFT_RED, TFT_NAVY);
+      // tft.setFreeFont(&FreeSansBold12pt7b);
+      // tft.drawCentreString("TX ON", 160, 45, 1);
+      tft.drawRoundRect(10, 80 - 45, 300, 68, 5, TFT_DARKGREY);
+      tft.fillRoundRect(9, 79 - 45, 302, 70, 6, TFT_BLACK);
+      tft.drawRoundRect(9, 79 - 45, 302, 70, 6, TFT_LIGHTGREY);
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-      tft.drawCentreString(formatFrequencyWithDots(selectedFrequencyViaKeypad), 160, 90, 7); // Centered horizontally at X=160
-      tft.setFreeFont(&FreeSans9pt7b);
+      tft.drawCentreString(formatFrequencyWithDots(selectedFrequencyViaKeypad), 160, 90 - 45, 7); // Centered horizontally at X=160
+      tft.setFreeFont(&FreeMono12pt7b);
       tft.setTextColor(TFT_WHITE, TFT_NAVY);
-      tft.drawCentreString("Output Power: < 16 mW (12 dBm)", 150, 170, 1);
-      tft.drawCentreString("Press 0 to Stop & Exit", 160, 210, 1);
+      tft.drawCentreString("Calibration in Khz", 150, 112, 1);
+
+      tft.drawCentreString("[1] -10     +10 [3]", 150, 137, 1);
+      tft.drawCentreString("[4] -2       +2 [6]", 150, 137 + 23, 1);
+      tft.drawCentreString("[7] -0.1   +0.1 [9]", 150, 137 + 23 + 23, 1);
+      tft.setTextColor(TFT_YELLOW, TFT_NAVY);
+      tft.setFreeFont(&FreeMonoBold12pt7b);
+
+      tft.drawCentreString("Press 0 to Finalize", 160, 212, 1);
       setFrequencyInMhz((float)selectedFrequencyViaKeypad / 1e6);
+      // setFrequencyInMhz(14.925);
     }
+
+    // --------------------------------------------------------------
+    // 🖲️ MPR121 Touch Handler: Apply SI5351 Calibration Corrections
+    // --------------------------------------------------------------
+    // This block is triggered on a touch interrupt. The pressed key
+    // is mapped from the keymapFKPF[] array. Keys 1/3, 4/6, 7/9 are
+    // used to increment or decrement the correction factor with
+    // different step sizes:
+    //    1 (-10000), 3 (+10000)
+    //    4 (-2500),  6 (+2500)
+    //    7 (-500),   9 (+500)
+    // The updated value is saved in Preferences and applied to the
+    // SI5351 PLL input using set_correction().
+    // --------------------------------------------------------------
 
     if (touchInterrupt)
     {
       touchInterrupt = false;
-
       uint16_t touched = cap.touched();
+
       for (uint8_t i = 0; i < 12; i++)
       {
         if (touched & (1 << i))
         {
           char key = keymapFKPF[i];
+
+          int delta = 0;
+          if (key == '1')
+            delta = 10000;
+          if (key == '3')
+            delta = -10000;
+          if (key == '4')
+            delta = 2000;
+          if (key == '6')
+            delta = -2000;
+          if (key == '7')
+            delta = 100;
+          if (key == '9')
+            delta = -100;
+
+          if (delta != 0)
+          {
+            cal_factor += delta;
+            preferences.putInt("cal_factor", cal_factor);
+            si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+
+            Serial.printf("📡 Calibration factor updated by %+d → New value: %d\n", delta, cal_factor);
+          }
+
           if (key == '0')
           {
-            Serial.println("🆗 Key 0 pressed!");
-            esp_restart(); // XXXXXXXXXXXXX  TO BE IMPROVED
+            Serial.println("🆗 Key 0 pressed! Restarting...");
             PowerSImoduleOFF();
-            displayMenu();
-            modeOfOperation = 6;
-            return;
+            displayMessageAndReboot();
           }
         }
       }
@@ -708,6 +730,7 @@ void loop()
     Serial.print(".");
     return;
   }
+
   // [10 for 3....] Frequency Input
   if (modeOfOperation == 10)
   {
@@ -731,9 +754,9 @@ void loop()
     }
   }
 
-  // KEYPAD HANDLING
+  // Main Menu Handling
   // [mode 6] Menu
-  if (touchInterrupt && modeOfOperation == 6)
+  if (touchInterrupt && modeOfOperation == 9)
   {
     touchInterrupt = false;
 
@@ -747,13 +770,23 @@ void loop()
         {
           lastKeyFKPF = key;
 
-          if (key >= '0' && key <= '5')
+          if (key >= '0' && key <= '6')
           {
-            Serial.print("🎯 Valid key pressed: ");
-            Serial.println(key);
+            // Serial.print("🎯 Valid key pressed: ");
+            // Serial.println(key);
             alredyDisplayedOnce = false;
             selectedModeOfOperation = key - '0'; // e.g., '4' - '0' = 4
+            if (selectedModeOfOperation == 0)
+            {
+              Serial.println("⚡ User pressed [0] ➜ Rebooting device 🔄");
 
+              displayMessageAndReboot();
+            }
+            if (selectedModeOfOperation == 2)
+            {
+              Serial.println("👉 User pressed [2] ➜ WSPR Mode 🌐");
+              displayWSPRmenu();
+            }
             if (selectedModeOfOperation == 3)
             {
               modeOfOperation = 10; // frequency input
@@ -773,6 +806,10 @@ void loop()
               modeOfOperation = 1; // tuning
               return;
             }
+            if (selectedModeOfOperation == 6)
+            {
+              displayAboutMessage();
+            }
           }
           else
           {
@@ -790,8 +827,8 @@ void loop()
     }
   }
 
-  // Frequency Input
-  if (touchInterrupt && modeOfOperation == 10)
+  // WSPR Menu Handling
+  if (touchInterrupt && modeOfOperation == 22)
   {
     touchInterrupt = false;
 
@@ -804,26 +841,28 @@ void loop()
         if (key != lastKeyFKPF)
         {
           lastKeyFKPF = key;
-          Serial.print("🔘 Key pressed: ");
-          Serial.println(key);
 
-          if (key == '*')
+          if (key >= '1' && key <= '8')
           {
-            starPressedTimeFKPF = millis();
-            starBeingHeldFKPF = true;
+            selectedBandIndex = key - '1';
+            Serial.printf("👉 User pressed [%c] ➜ Band %s selected (index %d)\n", key, WSPRbandNames[selectedBandIndex], selectedBandIndex);
+            modeOfOperation = 2; // ✅ Switch to next operating mode
+          }
+          else if (key == '0')
+          {
+            Serial.println("🔚 Quit selected.");
+            displayMessageAndReboot();
           }
           else
           {
-            handleKey(key);
+            Serial.print("🚫 Ignored key: ");
+            Serial.println(key);
           }
+          break;
         }
-        break;
       }
     }
   }
-
-
-
 
   // ✅ Check if * is still being held → handle reboot BEFORE release
   if (starBeingHeldFKPF && (cap.touched() & (1 << 0)))
@@ -834,15 +873,7 @@ void loop()
     {
       Serial.println("♻️ Rebooting after long * press");
 
-      // Show message before rebooting
-      tft.fillScreen(TFT_BLACK);
-      tft.setTextColor(TFT_RED, TFT_BLACK);
-      tft.setTextSize(2);
-      tft.setTextDatum(MC_DATUM);
-      tft.drawCentreString("REBOOTING", tft.width() / 2 + 10, tft.height() / 2 - 25, 4);
-
-      delay(2000);
-      ESP.restart();
+      displayMessageAndReboot();
     }
   }
 
@@ -876,6 +907,7 @@ void loop()
     lastKeyFKPF = 0;
   }
 }
+
 // ################################################################################################
 // Functions Implementation
 
@@ -1152,49 +1184,76 @@ void retrieveUserSettings()
 void connectToWiFi()
 {
   Serial.println("\n📡 Connecting to WiFi...");
-  WiFi.setHostname("HB9IIUtuner");
+
+  // 🧾 Configure device hostname before connection
+  WiFi.setHostname(hostname);
+
+  // 🔑 Begin WiFi connection using saved credentials
   WiFi.begin(ssid, password);
 
-  int rebootCount = preferences.getInt("rebootCount", 0);
-  int retries = 0;
+  preferences.begin("wifi", false); // 🔐 Open preferences under "wifi"
+  int rebootCount = preferences.getInt("rebootCount", 0); // Get previous reboot count
 
+  int retries = 0;
   while (WiFi.status() != WL_CONNECTED)
   {
-    delay(500);         // Faster animation
-    Serial.print("🔄"); // Connection attempt indicator
+    delay(500);         // ⏱️ Wait before checking again
+    Serial.print("📶 "); // Animation symbol to indicate waiting
     retries++;
 
+    // 💬 Show retry info on TFT after 3 failed attempts
+    if (retries > 3)
+    {
+      tft.setFreeFont(&FreeSans9pt7b);
+      String msg = "Retrying WiFi Connection (" + String(retries) + ")";
+      tft.setTextColor(TFT_RED);
+      tft.drawCentreString(msg, 160, 158, 1); // Draw in red
+
+      delay(500);
+
+      tft.setTextColor(TFT_BLACK);           // Clear by overwriting
+      tft.drawCentreString(msg, 160, 158, 1);
+    }
+
+    // ❌ Too many retries, trigger reboot and handle persistent failure
     if (retries > 20)
     {
       Serial.println("\n❌ Failed to connect to WiFi! Please check credentials.");
-
       rebootCount++;
       preferences.putInt("rebootCount", rebootCount);
 
       if (rebootCount >= 3)
       {
         Serial.println("⚠️ Too many failures! Performing factory reset...");
-        preferences.clear();
-        preferences.putInt("rebootCount", 0);
+        preferences.clear();                   // Reset all stored preferences
+        preferences.putInt("rebootCount", 0);  // Reset reboot counter
       }
 
-      preferences.end();
+      preferences.end(); // 🚪 Close preferences before reboot
       Serial.println("🔁 Rebooting now...");
       esp_restart();
     }
   }
 
-  // ✅ Connected Successfully
-  preferences.putInt("rebootCount", 0); // Reset counter
+  // ✅ Successfully connected
+  preferences.putInt("rebootCount", 0); // Reset reboot counter
+  preferences.end();                    // 🚪 Close preferences safely
+
   Serial.println("\n✅ WiFi Connected Successfully!");
+  tft.setTextColor(TFT_GREEN);
+  tft.drawCentreString("WiFi Connected Successfully!", 160, 158, 1);
+
+  Serial.print("📡 Connected to SSID: ");
+  Serial.println(WiFi.SSID());
+
   Serial.print("🌐 IP Address: ");
   Serial.println(WiFi.localIP());
 
+  // 📶 Print signal strength with friendly classification
   int rssi = WiFi.RSSI();
   Serial.print("📶 Signal Strength: ");
   Serial.print(rssi);
   Serial.print(" dBm - ");
-
   if (rssi >= -50)
     Serial.println("🏆 Excellent");
   else if (rssi >= -70)
@@ -1204,15 +1263,15 @@ void connectToWiFi()
   else
     Serial.println("🚫 Poor");
 
-  // 🌍 Start mDNS
-  if (!MDNS.begin("HB9IIUtuner"))
+  // 🌍 Start mDNS responder
+  if (!MDNS.begin(hostname))
   {
     Serial.println("❌ mDNS responder failed to start!");
   }
   else
   {
     Serial.println("✅ mDNS responder started!");
-    Serial.println("🔗 Access your device at: http://HB9IIUtuner.local");
+    Serial.printf("🔗 Access your device at: http://%s.local\n", hostname);
   }
 }
 void configure_web_server_routes()
@@ -1220,6 +1279,7 @@ void configure_web_server_routes()
   Serial.println("🌍 Starting Web Server Route Configuration...");
 
   // Route for root / web page
+  /*
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
             {
       Serial.println("📄 Route: / -> /index.html");
@@ -1230,6 +1290,12 @@ void configure_web_server_routes()
             {
       Serial.println("📄 Route: /index.html -> /index.html");
       request->send(SPIFFS, "/index.html", "text/html"); });
+*/
+  // Route for diagnostic.html web page (same as above)
+  server.on("/diagnostic.html", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+      Serial.println("📄 Route: /diagnostic.html -> /diagnostic.html");
+      request->send(SPIFFS, "/diagnostic.html", "text/html"); });
 
   server.on("/getAllSettings", HTTP_GET, [](AsyncWebServerRequest *request)
             {
@@ -1426,6 +1492,34 @@ Serial.printf("📤 Sending Calibration Factor: %d\n", cal_factor);
 String cal_factor_str = String(cal_factor);
 
       request->send(200, "text/plain", cal_factor_str); });
+  server.on("/sweepdata", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+  DynamicJsonDocument doc(8192);
+
+  // Coarse sweep data
+  JsonArray coarse = doc.createNestedArray("coarse");
+  for (int i = 0; i < coarseSweepCount; i++) {
+    JsonArray point = coarse.createNestedArray();
+    point.add(coarse_sweep_frequ[i]);
+    point.add(coarse_sweep_adc[i]);
+  }
+  doc["coarseMaxFreq"] = coarsePeakFreq;
+  doc["coarseMaxADC"]  = coarsePeakAdc;
+
+  // Fine sweep data
+  JsonArray fine = doc.createNestedArray("fine");
+  for (int i = 0; i < fineSweepCount; i++) {
+    JsonArray point = fine.createNestedArray();
+    point.add(fine_sweep_frequ[i]);
+    point.add(fine_sweep_adc[i]);
+  }
+  doc["fineMaxFreq"] = finePeakFreq;
+  doc["fineMaxADC"]  = finePeakAdc;
+
+  // Send response
+  String response;
+  serializeJson(doc, response);
+  request->send(200, "application/json", response); });
 
   server.begin();
   Serial.println("✅ Web Server Routes Configuration Completed!");
@@ -1451,6 +1545,9 @@ void updateNTPTime()
   // Try to update NTP time up to 10 times or until timeout
   while (attempts < 10)
   {
+
+    ;
+
     if (timeClient.update())
     {
       Serial.print("✅ NTP time updated successfully: ");
@@ -1468,8 +1565,15 @@ void updateNTPTime()
       Serial.print("⚠️ Failed to update NTP time. Retrying (Attempt ");
       Serial.print(attempts + 1);
       Serial.println("/10)...");
+
+      tft.setFreeFont(&FreeSans9pt7b);
+      String msg = "Failed to update NTP time. Retrying (" + String(attempts) + ")";
+      tft.setTextColor(TFT_RED);
+      tft.drawCentreString(msg, 160, 158, 1);
       initializeTimeClient(); // Re-initialize time client
       delay(2000);            // Wait before retrying
+      tft.setTextColor(TFT_BLACK);
+      tft.drawCentreString(msg, 160, 158, 1);
       attempts++;
     }
   }
@@ -1523,16 +1627,12 @@ void si5351_WarmingUp()
   Serial.println("🔥 Radio Module 'Warming Up' Started...");
 
   // 🎛️ Apply small random frequency offset (-100 to +100 Hz)
-  WSPR_TX_operatingFrequ = TX_referenceFrequ + (100ULL * random(-100, 100));
+
+  WSPR_TX_operatingFrequ = setRandomWSPRfrequency(selectedBandIndex); /// XXXXXX
 
   // 📡 Log the new TX frequency with formatting
   Serial.print("📶 Setting TX Frequency to: ");
-  printWithThousandsSeparator(WSPR_TX_operatingFrequ / 100);
-
-  // 🎙️ Determine the band name from the frequency (optional info)
-  std::string band = getBandFromFrequency(TX_referenceFrequ);
-  Serial.print("📻 Operating Band: ");
-  Serial.println(band.c_str());
+  printWithThousandsSeparator(WSPR_TX_operatingFrequ);
 
   // ⚙️ Configure Si5351 for transmission
   si5351.set_freq(WSPR_TX_operatingFrequ, SI5351_CLK0);
@@ -1981,109 +2081,146 @@ void setFrequencyInMhz(float freqMHz)
 
 unsigned long findResonanceFrequency()
 {
-  Serial.println("\n--- Starting Resonance Sweep ---");
+  bool verbose = true;
 
-  float bestFreq = 0.0;
-  int bestAdc = 0;
-  int minAdc = 4096;                    // 12-bit ADC max value
-  si5351.set_clock_pwr(SI5351_CLK0, 1); // Power up CLK0
+  const unsigned long coarseStartHz = 9000000UL;
+  const unsigned long coarseEndHz = 20000000UL;
+  const unsigned long coarseStepHz = 50000UL;
 
-  // ----- Coarse Sweep -----
-  int adcSamples = 1; // Fast scanning for coarse peak detection
-  Serial.println("Coarse");
+  const unsigned long fineSpanHz = 400000UL;
+  const unsigned long fineStepHz = 1000UL;
+  int fineAdcSamples = 1;
 
-  for (float freq = F_START_MHZ; freq <= F_END_MHZ; freq += (F_STEP_HZ / 1e6))
+  int frequChangeDelay = 1;
+  int sweepCounter = 0;
+  int minAdcValue = 4096;
+
+  unsigned long tempFreq[MAX_SWEEP_POINTS];
+  int tempAdc[MAX_SWEEP_POINTS];
+  int tempCount = 0;
+
+  si5351.set_clock_pwr(SI5351_CLK0, 1);
+
+  // === COARSE SWEEP ===
+  if (verbose)
+    Serial.println("---COARSE_START---");
+
+  for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
   {
+    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    delay(frequChangeDelay);
+    int adcValue = readAveragedAdc(ADC_PIN, 1);
+    // Serial.printf("COARSE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
 
-    si5351.set_freq((uint64_t)(freq * 1e8), SI5351_CLK0);
-
-    int adcValue = readAveragedAdc(ADC_PIN, adcSamples);
-
-    if (adcValue > bestAdc)
+    if (tempCount < MAX_SWEEP_POINTS)
     {
-      bestAdc = adcValue;
-      bestFreq = freq;
-    }
-    if (adcValue < minAdc)
-    {
-      minAdc = adcValue;
-    }
-  }
-  Serial.println("");
-  Serial.println("Fine");
+      tempFreq[tempCount] = freqHz;
+      tempAdc[tempCount] = adcValue;
+      tempCount++;
 
-  // ----- Fine Sweep with Moving Average -----
-  const int spanHz = 250000;   // ±250 kHz around the coarse peak
-  const int fineStepHz = 800;  // 1 kHz steps
-  const int smaWindowSize = 1; // Moving average window size
-
-  float fineStartFreq = bestFreq - spanHz / 1e6;
-  float fineStopFreq = bestFreq + spanHz / 1e6;
-
-  bestFreq = 0.0;
-  bestAdc = 0;
-  minAdc = 4096;
-  adcSamples = 4; // More accurate ADC during fine sweep
-
-  // Circular buffer for SMA
-  int adcBuffer[smaWindowSize] = {0};
-  int bufferIndex = 0;
-  int bufferCount = 0;
-  int adcSum = 0;
-
-  float freqAtBestAdc = 0.0;
-  float currentFreq = fineStartFreq;
-
-  for (float freq = fineStartFreq; freq <= fineStopFreq; freq += (fineStepHz / 1e6))
-  {
-    Serial.print(".");
-
-    si5351.set_freq((uint64_t)(freq * 1e8), SI5351_CLK0);
-    int adcValue = readAveragedAdc(ADC_PIN, adcSamples);
-
-    // Update circular buffer for SMA
-    adcSum -= adcBuffer[bufferIndex];  // Remove oldest value
-    adcBuffer[bufferIndex] = adcValue; // Add new value
-    adcSum += adcValue;
-
-    bufferIndex = (bufferIndex + 1) % smaWindowSize;
-    if (bufferCount < smaWindowSize)
-      bufferCount++;
-
-    // Compute SMA only after the buffer is full
-    if (bufferCount == smaWindowSize)
-    {
-      int smaAdc = adcSum / smaWindowSize;
-
-      // Track the maximum of the smoothed values
-      if (smaAdc > bestAdc)
+      if (adcValue < minAdcValue)
       {
-        bestAdc = smaAdc;
-        bestFreq = freq - ((smaWindowSize / 2) * fineStepHz / 1e6); // Adjust for SMA center
+        minAdcValue = adcValue;
       }
     }
+  }
 
-    // Track min ADC value for noise floor info
-    if (adcValue < minAdc)
+  coarseSweepCount = tempCount;
+  coarsePeakAdc = 0;
+  coarsePeakFreq = 0;
+
+  for (int i = 0; i < tempCount; i++)
+  {
+    coarse_sweep_frequ[i] = tempFreq[i];
+    coarse_sweep_adc[i] = tempAdc[i];
+
+    if (tempAdc[i] > coarsePeakAdc)
     {
-      minAdc = adcValue;
+      coarsePeakAdc = tempAdc[i];
+      coarsePeakFreq = tempFreq[i];
     }
   }
 
-  // ----- Final Results -----
-  Serial.println("");
-  Serial.printf(">>> Peak ADC (Smoothed): %d at %.5f MHz\n", bestAdc, bestFreq);
-  Serial.printf(">>> Noise Floor ADC: %d\n", minAdc);
-  Serial.printf(">>> Delta (max-min): %d\n", (bestAdc - minAdc));
+  if (verbose)
+  {
+    Serial.printf("🟨 COARSE_MAX_ADC: %d at %lu Hz\n", coarsePeakAdc, coarsePeakFreq);
+    Serial.println("---COARSE_END---");
+  }
 
-  range = bestAdc - minAdc;
+  // === FINE SWEEP ===
+  if (verbose)
+    Serial.println("---FINE_START---");
+  fineAdcSamples = 3;
+  tempCount = 0;
+  for (int i = 0; i < MAX_SWEEP_POINTS; i++)
+  {
+    tempFreq[i] = 0;
+    tempAdc[i] = 0;
+  }
 
-  bestAdcAtSweep = bestAdc;
+  unsigned long fineStartHz = coarsePeakFreq - fineSpanHz / 2;
+  unsigned long fineStopHz = coarsePeakFreq + fineSpanHz / 2;
 
-  noiseFloor = minAdc;
+  // Serial.printf("🟨 FINE SWEEP from %lu to %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, fineStepHz);
 
-  resonanceFrequ = bestFreq * 1e6;
+  for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += fineStepHz)
+  {
+    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    delay(frequChangeDelay);
+    int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
+    // Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
 
+    if (tempCount < MAX_SWEEP_POINTS)
+    {
+      tempFreq[tempCount] = freqHz;
+      tempAdc[tempCount] = adcValue;
+      tempCount++;
+
+      if (adcValue < minAdcValue)
+      {
+        minAdcValue = adcValue;
+      }
+    }
+  }
+
+  fineSweepCount = tempCount;
+  finePeakAdc = 0;
+  finePeakFreq = 0;
+
+  for (int i = 0; i < tempCount; i++)
+  {
+    fine_sweep_frequ[i] = tempFreq[i];
+    fine_sweep_adc[i] = tempAdc[i];
+
+    if (tempAdc[i] > finePeakAdc)
+    {
+      finePeakAdc = tempAdc[i];
+      finePeakFreq = tempFreq[i];
+    }
+  }
+
+  if (verbose)
+  {
+    Serial.printf("🟨 FINE_MAX_ADC: %d at %lu Hz\n", finePeakAdc, finePeakFreq);
+    Serial.println("---FINE_END---");
+  }
+
+  // Summary
+  if (verbose)
+  {
+    Serial.println("---SUMMARY---");
+    Serial.printf("🟨 NOISE_FLOOR: %d\n", minAdcValue);
+    Serial.printf("🟨 DELTA: %d\n", finePeakAdc - minAdcValue);
+    Serial.printf("🟨 FINAL RESONANCE FREQUENCY: %lu Hz\n", finePeakFreq);
+    Serial.println("SWEEP_DONE");
+  }
+
+  resonanceFrequ = finePeakFreq;
+  bestAdcAtSweep = finePeakAdc;
+  noiseFloor = minAdcValue;
+
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  delay(2000);
   return resonanceFrequ;
 }
 
@@ -2310,12 +2447,8 @@ void updateDisplay()
         if (key == '0')
         {
           Serial.println("🆗 Key 0 pressed!");
-          esp_restart(); // XXXXXXXXXXXXXXX TO BE IMPROVED
-          stopCWbeacon = true;
           PowerSImoduleOFF();
-          displayMenu();
-          modeOfOperation = 6;
-          return;
+          displayMessageAndReboot();
         }
       }
     }
@@ -2473,58 +2606,245 @@ void handleKey(char key)
   }
 }
 
-void rebootESP()
-{
-  tft.fillScreen(TFT_NAVY);
-  tft.setFreeFont(&Orbitron_Light_32);
-  tft.setTextSize(2);
-  for (int i = 0; i < 5; i++)
-  {
-    tft.setTextColor(TFT_YELLOW, TFT_NAVY);
-    tft.drawCentreString("Rebooting", 160, 120 - 24, 4);
-    delay(150);
-    tft.setTextColor(TFT_NAVY, TFT_NAVY);
-    tft.drawCentreString("Rebooting", 160, 120 - 24, 4);
-    delay(150);
-  }
-  esp_restart();
-}
-
 void PowerSImoduleOFF()
 {
   si5351.set_clock_pwr(SI5351_CLK0, 0); // Power OFF
   Serial.println("🔌 SI5351 CLK0 powered OFF");
 }
 
-void displayMenu()
+void displayMainMenu()
 {
+  // 🔹 Header and screen setup
   tft.fillScreen(TFT_NAVY);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.fillRect(0, 0, 320, 30, TFT_BLACK);
   tft.drawCentreString("MLA Toolbox Menu", 160, 4, 4);
+
+  // 🔹 Subtitle
+  tft.setTextColor(TFT_GOLD, TFT_NAVY);
+  tft.setFreeFont(&FreeMonoBold12pt7b);
+  tft.drawCentreString("Select Operating mode", 160, 40, 1);
+
+  // 🔹 Menu options
+  const char *menuItems[] = {
+      "[1] MLA Tuning",
+      "[2] WSPR Transmitter",
+      "[3] CW Beacon",
+      "[4] VFO",
+      "[5] Diagnostic",
+      "[6] About",
+      "[0] Reboot"};
+
+  tft.setFreeFont(&FreeMono9pt7b);
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
-  int x = 7;                           // Left margin
-  int y = 90;
+  int x = 12;
+  int y = 65;
   int lineGap = 24;
-  y = 40;
-  tft.drawString("Select Operating mode:", x, y);
-  y += lineGap + 5;
-  tft.drawString("[1] MLA Tuning", x, y);
-  y += lineGap;
-  tft.drawString("[2] WSPR Transmitter", x, y);
-  y += lineGap;
-  tft.drawString("[3] CW Beacon", x, y);
-  y += lineGap;
-  tft.drawString("[4] VFO", x, y);
-  y += lineGap;
-  tft.drawString("[5] Diagnostic", x, y);
-  y += lineGap;
-  tft.drawString("[6] About", x, y);
-  y += lineGap;
-  tft.drawString("[0] Reboot", x, y);
-  tft.setTextFont(1); // Select FONT1 (Adafruit 8px)
+
+  for (uint8_t i = 0; i < sizeof(menuItems) / sizeof(menuItems[0]); i++)
+  {
+    tft.drawString(menuItems[i], x, y);
+    y += lineGap;
+  }
+
+  // 🔹 Footer: Version
+  tft.setTextFont(1); // FONT1 = 8px
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
   tft.drawRightString(String("Version: ") + VERSION, 300, 220, 1);
+
+  // 🔹 Console output and state
+  Serial.println("\n🧭 Waiting for user to select a main menu option (keys 0–6)...");
+  modeOfOperation = 9; // Main menu handling
+}
+
+bool initSI5351()
+{
+  const uint8_t SI5351_ADDRESS = 0x60;
+
+  Wire.begin(); // Start I2C (you can customize pins if needed)
+
+  // 🧪 Check if Si5351 is responding on I²C
+  Wire.beginTransmission(SI5351_ADDRESS);
+  if (Wire.endTransmission() != 0)
+  {
+    Serial.println("❌ Si5351 not found at 0x60. Check wiring or power.");
+    return false;
+  }
+
+  Serial.println("✅ Success! Si5351 module found!! 🎉");
+  Serial.println("📡 Initializing Si5351...");
+
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+
+  Serial.print("🔧 Applying Calibration Factor: ");
+  Serial.println(cal_factor);
+  si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+
+  Serial.print("📶 Setting TX Reference Frequency: ");
+  Serial.print(TX_referenceFrequ);
+  Serial.println(" Hz");
+  si5351.set_freq(TX_referenceFrequ, SI5351_CLK0);
+
+  Serial.println("💪 Setting Drive Strength: 8 mA");
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+
+  Serial.println("🔌 Powering down CLK0 output initially.");
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+
+  return true;
+}
+
+void displayMessageAndReboot()
+{
+
+  tft.fillScreen(TFT_BLACK);
+
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_GOLD, TFT_BLACK);
+
+  tft.setFreeFont(&Orbitron_Light_32);
+  tft.drawCentreString("73! de HB9IIU", 160, 150, 1);
+
+  tft.setTextSize(1);
+  for (int i = 0; i < 5; i++)
+  {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawCentreString("REBOOTING", 160, 60, 1);
+    delay(120);
+    tft.setTextColor(TFT_BLACK, TFT_BLACK);
+    tft.drawCentreString("REBOOTING", 160, 60, 1);
+    delay(120);
+  }
+
+  tft.flush();
+
+  ESP.restart();
+}
+
+void displayAboutMessage()
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_GOLD, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM); // Top-left corner
+  tft.setCursor(100, 0);
+  tft.setTextSize(2);
+  tft.setTextFont(2); // Smallest font
+  tft.println("MLA ToolBox");
+  tft.setCursor(0, 30);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  tft.setTextFont(2);
+
+  tft.println(" In Active & Continuous development:");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+
+  tft.println("  - New features appear anytime");
+  tft.println("  - Bugs might sneak in ...");
+  tft.println("  - Forgive the quirks, enjoy the ride!");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.println("   Free & open for all tinkerers and builders.");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+
+  tft.println("   Enjoy, share, and report bugs:");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.println("   http://github.com/HB9IIU/ESP32-MLA-Toolbox");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.println("   Tuning is Science + Magic = Fun!!");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.println("       73! de HB9IIU");
+  delay(10000);
+  displayMessageAndReboot();
+}
+
+void displayWSPRmenu()
+{
+  // Clear screen and draw title bar
+  tft.fillScreen(TFT_NAVY);
+  tft.setTextColor(TFT_YELLOW);
+  tft.fillRect(0, 0, 320, 30, TFT_BLACK);
+  tft.drawCentreString("WSPR MODE", 160, 4, 4);
+
+  // Section title
+  tft.setFreeFont(&FreeMonoBold12pt7b);
+  tft.setTextColor(TFT_GOLD);
+  int y = 36;
+  tft.drawCentreString("Select WSPR band", 160, y, 1);
+
+  // Band list
+  tft.setTextColor(TFT_WHITE);
+  y += 24;
+  tft.setFreeFont(&FreeMono9pt7b);
+  int x = 26;
+  int lineGap = 19;
+
+  for (byte i = 0; i < numWSPRbands; i++)
+  {
+    unsigned long centerFreqHz = (WSPRbandStart[i] + WSPRbandEnd[i]) / 2;
+
+    // Inlined formatter (same logic as formatFrequencyHz)
+    char freqStr[14]; // 13 chars + null terminator
+    unsigned long millions = centerFreqHz / 1000000;
+    unsigned long thousands = (centerFreqHz / 1000) % 1000;
+    unsigned long units = centerFreqHz % 1000;
+    sprintf(freqStr, "%2lu.%03lu.%03lu Hz", millions, thousands, units);
+
+    // Final line output
+    char line[50];
+    sprintf(line, "[%d] %-4s (%s)", i + 1, WSPRbandNames[i], freqStr);
+    tft.drawString(line, x, y);
+    y += lineGap;
+  }
+  // Quit instruction
+  y += 10;
+  tft.setTextColor(TFT_GOLD);
+  tft.drawCentreString("Press [0] to Quit", 160, y - 6, 1);
+  modeOfOperation = 22; // wspr menu keypad
+  Serial.println("\n🕹️ Waiting for user to select WSPR band (keys 1–8, 0 = Quit)...");
+}
+
+// ✅ Returns a randomized safe WSPR transmit frequency for a given band index
+unsigned long setRandomWSPRfrequency(byte bandIndex)
+{
+  unsigned long officialStart = WSPRbandStart[bandIndex];
+  unsigned long officialEnd = WSPRbandEnd[bandIndex];
+  unsigned long minF = officialStart + 3;
+  unsigned long maxF = officialEnd - 3;
+
+  unsigned long freq = random(minF, maxF + 1); // inclusive range
+
+  Serial.printf("🎯 Selected random freq within available range:  %lu Hz\n", freq);
+
+  return freq;
+}
+// ✅ Returns selected WSPR band information
+void displaySelecetdBandInformation(byte bandIndex)
+{
+  unsigned long officialStart = WSPRbandStart[bandIndex];
+  unsigned long officialEnd = WSPRbandEnd[bandIndex];
+  unsigned long minF = officialStart + 3;
+  unsigned long maxF = officialEnd - 3;
+  Serial.println();
+  Serial.println("📶 --- WSPR Transmission Setup --------------------------------------");
+  Serial.printf("🔹 Band:           %s\n", WSPRbandNames[bandIndex]);
+  Serial.printf("🔹 Sub-band:       %lu – %lu Hz\n", officialStart, officialEnd);
+  Serial.printf("🔹 Usable range:   %lu – %lu Hz (excludes ±3 Hz edges)\n", minF, maxF);
+  Serial.println("📏 Bandwidth used: ~6 Hz centered around selected frequency");
+  Serial.println("---------------------------------------------------------------------");
+  Serial.println();
 }

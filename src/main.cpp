@@ -1,11 +1,10 @@
 // ################################################################################################
 // Includes
 #ifdef MYCONFIG_H_EXISTS
-    #include <myconfig.h>  // Only include myconfig.h if it exists
+#include <myconfig.h> // Only include myconfig.h if it exists
 #else
-    #include <config.h>     // Include config.h if configDS.h is not present
+#include <config.h> // Include config.h if configDS.h is not present
 #endif
-
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -22,15 +21,12 @@
 #include <Adafruit_MPR121.h>
 //------------------------------------
 #include <PNGdec.h> //PNG image decoding library
-// #define LOAD_GFXFF  // This must be defined to use FreeFonts (GFX fonts)
 
 #define VERSION "2.0"
 
 #define IRQ_PIN 17
 
-
-
-#define MAX_SWEEP_POINTS 400
+#define MAX_SWEEP_POINTS 405
 
 unsigned long coarse_sweep_frequ[MAX_SWEEP_POINTS];
 int coarse_sweep_adc[MAX_SWEEP_POINTS];
@@ -42,28 +38,36 @@ int fineSweepCount = 0;
 
 unsigned long resonanceFrequ = 0;
 int bestAdcAtSweep = 0;
-int noiseFloor = 4096;  // initial max ADC value (12-bit ADC max 4095)
+int noiseFloor = 4096; // initial max ADC value (12-bit ADC max 4095)
 
 // Global resonance peak results for both coarse and fine sweeps
 int coarsePeakFreq = 0;
-int coarsePeakAdc  = 0;
-unsigned long finePeakFreq   = 0;
-unsigned long finePeakAdc    = 0;
-
-
-
-
-
-
-
-
-
-
+int coarsePeakAdc = 0;
+unsigned long finePeakFreq = 0;
+unsigned long finePeakAdc = 0;
 
 Adafruit_MPR121 cap = Adafruit_MPR121();
 // ################################################################################################
 // Prototype declarations
 // related to WSPR
+// ✅ WSPR Band Definitions (Hz) from official sub-band plan
+// https://www.wsprnet.org/drupal/sites/wsprnet.org/files/wspr-qrg.pdf
+const char *WSPRbandNames[] = {
+    "80m", "40m", "30m", "20m", "17m", "15m", "12m", "10m"};
+
+const unsigned long WSPRbandStart[] = {
+    3570000, 7040000, 10140100, 14097000, 18106000, 21096000, 24926000, 28126000};
+
+const unsigned long WSPRbandEnd[] = {
+    3570200, 7040200, 10140300, 14097200, 18106200, 21096200, 24926200, 28126200};
+
+const byte numWSPRbands = sizeof(WSPRbandNames) / sizeof(WSPRbandNames[0]);
+
+// ✅ Returns a randomized safe WSPR transmit frequency for a given band index
+unsigned long setRandomWSPRfrequency(byte bandIndex);
+void displaySelecetdBandInformation(byte bandIndex);
+//----------------------------------------------------------------------------------------
+
 void printVersionBox(const String &text, String version);
 void initTFT();
 void mountAndListSPIFFS(uint8_t levels = 255, bool listContent = true);
@@ -85,6 +89,7 @@ String convertPosixToHHMMSS(time_t posixTime);
 void TX_ON_counter_core0(void *parameter);
 std::string getBandFromFrequency(uint32_t frequency);
 void startAPMode();
+void displayWSPRmenu();
 
 // related to tuner
 void plotNeedle(int value);
@@ -98,12 +103,17 @@ int readAveragedAdc(int pin, int samples);
 void setFrequencyInMhz(float freqMHz);
 unsigned long findResonanceFrequency();
 bool initSI5351();
+byte selectedBandIndex;
+
 String formatFrequencyWithDots(unsigned freq);
+
+// related to web server
+const char *hostname = "mlatoolbox";
 
 // related to keypad
 void initKeypad();
 void IRAM_ATTR handleTouchIRQ();
-void displayMenu();
+void displayMainMenu();
 int selectedModeOfOperation;
 volatile bool touchInterrupt = false;
 String lastFormattedFKPF = "";
@@ -134,16 +144,14 @@ void displayFrequencyFKPF();
 void handleKey(char key);
 
 // Helpers
-void rebootESP();
+void displayMessageAndReboot();
+void displayAboutMessage();
 
 // Global Variables for meter
 #define M_SIZE 1.3333   // Meter size scale factor for rotation(1)
 #define TFT_GREY 0x5AEB // Custom grey color for background
 float ltx = 0;
 uint16_t osx = M_SIZE * 120, osy = M_SIZE * 120;
-
-
-
 
 #define ADC_PIN 34
 // RELATED TO CW BEACON
@@ -189,7 +197,6 @@ NTPClient timeClient(ntpUDP, "time-a-g.nist.gov");
 
 int modeOfOperation = 0;
 
-// Constants for WSPR band start frequencies (in Hz)
 const unsigned long long WSPRbandStartFrequencies[] = {
     356860000ULL,  // 80 m -> 3.568.600 Hz
     528720000ULL,  // 60 m -> 5.287.200 Hz
@@ -245,8 +252,7 @@ uint8_t dbm = 24;
 // WSPR general settings
 bool warmingup = false;
 unsigned long long WSPR_TX_operatingFrequ;
-unsigned long long TX_referenceFrequ;
-unsigned long long calibrationFrequ = 1400000000ULL;
+unsigned long long TX_referenceFrequ = 0;
 TaskHandle_t txCounterTaskHandle = NULL;
 
 #define TONE_SPACING 146 // ~1.46 Hz
@@ -274,37 +280,61 @@ void setup()
 
   initTFT();
 
-  initKeypad();
-
   displayPNGfromSPIFFS("splash.png", 0); // will stay on enough time due to next steps
 
-  // Initialize Preferences storage with namespace "settings" for read-write access
-  preferences.begin("settings", false);
-  // Check if WiFi credentials are stored in preferences
+  // 🧠 Initialize Preferences (non-volatile storage) with namespace "settings"
+  preferences.begin("settings", false); // false = read/write mode
+
+  // 📦 Try to retrieve stored WiFi credentials from Preferences
   String storedSSID = preferences.getString("ssid", "");
   String storedPassword = preferences.getString("password", "");
 
-  if (storedSSID == "" || storedPassword == "")
+bool debugAP = false;
+// 🕵️‍♂️ Check if credentials are available or AP debug mode is enabled
+if (storedSSID == "" || storedPassword == "" || debugAP)
   {
-    Serial.println("No stored WiFi credentials found.");
-    Serial.println("ESP will enter in AP mode");
-    APmode = true;
-    storedSSID = WIFI_SSID;
-    storedPassword = WIFI_PASSWORD;
+    // ❌ No credentials found
+    Serial.println("⚠️  No stored Wi-Fi credentials found (or debug mode).");
+    Serial.println("📡 Entering Access Point (AP) Mode for user configuration...");
+    // display message on TFT
+    delay(1000);
+    closeSplashEffect(tft);
+    tft.fillScreen(TFT_NAVY);
+    tft.setTextColor(TFT_GOLD, TFT_BLACK);
+    tft.fillRect(0, 0, 320, 30, TFT_BLACK);
 
-    // Assign stored credentials to WiFi credentials
+    tft.drawCentreString("One Time Config", 160, 4, 4);
+    int y = 50;
+    int gap = 45;
+    tft.setTextColor(TFT_GOLD, TFT_NAVY);
+
+    tft.drawCentreString("Connect to Wifi Network", 160, y, 4);
+    y = y + gap;
+    tft.setTextColor(TFT_WHITE, TFT_NAVY);
+
+    tft.drawCentreString("MLA-TOOLBOX-CONFIG", 160, y, 4);
+    y = y + gap;
+    tft.setTextColor(TFT_GOLD, TFT_NAVY);
+
+    tft.drawCentreString("To configure device @", 160, y, 4);
+    y = y + gap;
+    tft.drawCentreString("http://192.168.4.1", 160, y, 4);
+
+    // 📝 Assign empty credentials (AP mode will be triggered)
     ssid = storedSSID.c_str();
     password = storedPassword.c_str();
-    APmode = false;
+    APmode = true;
   }
   else
   {
-    Serial.println("Stored WiFi credentials found:");
-    Serial.print("- SSID: ");
+    // ✅ Credentials found
+    Serial.println("🔐 Stored Wi-Fi credentials found:");
+    Serial.print("  📶 SSID: ");
     Serial.println(storedSSID);
-    Serial.print("- PASS: ");
+    Serial.print("  🔑 PASS: ");
     Serial.println(storedPassword);
-    // Assign stored credentials to WiFi credentials
+
+    // 📝 Assign stored credentials for station mode connection
     ssid = storedSSID.c_str();
     password = storedPassword.c_str();
     APmode = false;
@@ -327,16 +357,18 @@ void setup()
     // Update NTP time
     updateNTPTime();
 
-initSI5351();
+    // init keypad
+    initKeypad();
 
-    Serial.println("🔌 Powering down CLK0 output initially.");
-    si5351.set_clock_pwr(SI5351_CLK0, 0); // Power down CLK0 initially (0 = power off)
+    // init RF module
+    initSI5351();
+
+    displayMainMenu();
   }
   else
   {
     startAPMode();
   }
-  closeSplashEffect(tft);
 
   /*
   drawAnalogMeter();
@@ -435,55 +467,23 @@ initSI5351();
   modeOfOperation = 3;
   delay(0);
 
-  // WSPR
-  // Title Box
-  tft.fillScreen(TFT_NAVY);     // Background navy blue
-  tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
-  tft.fillRect(0, 0, 320, 30, TFT_DARKGREY);
-  tft.drawCentreString("WSPR MODE", 160, 4, 4);
-  tft.setTextColor(TFT_WHITE);         // Text color white, no background fill
-  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
 
-  y = 33;
-  lineGap = 18;
-  tft.drawString("📡 Select WSPR Band:", x, y);
-  y += lineGap + 5;
-
-  tft.drawString("[1] 80 m  (3.592.600 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[2] 40 m  (7.038.600 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[3] 30 m (10.140.200 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[4] 20 m (14.097.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[5] 17 m (18.106.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[6] 15 m (21.096.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[7] 12 m (24.926.100 Hz)", x, y);
-  y += lineGap;
-  tft.drawString("[8] 10 m (28.124.600 Hz)", x, y);
-  y += lineGap + 10;
-
-  tft.drawString("Press [0] to Quit", x, y);
-  delay(0);
-  displayPNGfromSPIFFS("world.png", 1000);
-  displayPNGfromSPIFFS("eur.png", 1000);
 */
   // MENU
-  displayMenu();
-
-  modeOfOperation = 1;
 }
-
-
 
 // ################################################################################################
 // Loop Function
 
 void loop()
 {
+  
+  if (APmode==true)
+  {
+    delay(100);
+    return;
+  }
+
   // modeOfOperation
   // [1] MLA Tuning
   // [2] WSPR Tuning
@@ -493,13 +493,7 @@ void loop()
   // [6] About
   // [0] Restart
 
-  // [0] Restart
-  if (modeOfOperation == 0)
-  {
-    rebootESP();
-  }
   // [1] Tuning mode
-
   if (modeOfOperation == 1)
 
   {
@@ -592,8 +586,7 @@ void loop()
     Serial.println(convertPosixToHHMMSS(nextPosixTxTime));
     TX_referenceFrequ = WSPRbandStartFrequencies[4];
 
-    Serial.print("TX_referenceFrequ: ");
-    Serial.println(formatFrequencyWithDots(TX_referenceFrequ / 100));
+    displaySelecetdBandInformation(selectedBandIndex);
 
     uint64_t initialRemainingSeconds = nextPosixTxTime - currentEpochTime;
     Serial.print("Next transmission in ");
@@ -629,6 +622,7 @@ void loop()
     Serial.print("\n");
     return;
   }
+
   // [3] CW Beacon mode
   if (modeOfOperation == 3)
   {
@@ -663,6 +657,7 @@ void loop()
       delay(5000); // Duration of the pause at the end after the long signal - in milliseconds
     }
   }
+
   // [4] VFO
   if (modeOfOperation == 4)
   {
@@ -672,40 +667,83 @@ void loop()
       tft.fillScreen(TFT_NAVY);
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
       tft.fillRect(0, 0, 320, 30, TFT_BLACK);
-      tft.drawCentreString("VFO", 160, 4, 4);
-      tft.setTextColor(TFT_RED, TFT_NAVY);
-      tft.setFreeFont(&FreeSansBold12pt7b);
-      tft.drawCentreString("TX ON", 160, 45, 1);
-      tft.drawRoundRect(10, 80, 300, 68, 5, TFT_DARKGREY);
-      tft.fillRoundRect(9, 79, 302, 70, 6, TFT_BLACK);
-      tft.drawRoundRect(9, 79, 302, 70, 6, TFT_LIGHTGREY);
+      tft.drawCentreString("VFO is ON", 160, 4, 4);
+      // tft.setTextColor(TFT_RED, TFT_NAVY);
+      // tft.setFreeFont(&FreeSansBold12pt7b);
+      // tft.drawCentreString("TX ON", 160, 45, 1);
+      tft.drawRoundRect(10, 80 - 45, 300, 68, 5, TFT_DARKGREY);
+      tft.fillRoundRect(9, 79 - 45, 302, 70, 6, TFT_BLACK);
+      tft.drawRoundRect(9, 79 - 45, 302, 70, 6, TFT_LIGHTGREY);
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-      tft.drawCentreString(formatFrequencyWithDots(selectedFrequencyViaKeypad), 160, 90, 7); // Centered horizontally at X=160
-      tft.setFreeFont(&FreeSans9pt7b);
+      tft.drawCentreString(formatFrequencyWithDots(selectedFrequencyViaKeypad), 160, 90 - 45, 7); // Centered horizontally at X=160
+      tft.setFreeFont(&FreeMono12pt7b);
       tft.setTextColor(TFT_WHITE, TFT_NAVY);
-      tft.drawCentreString("Output Power: < 16 mW (12 dBm)", 150, 170, 1);
-      tft.drawCentreString("Press 0 to Stop & Exit", 160, 210, 1);
+      tft.drawCentreString("Calibration in Khz", 150, 112, 1);
+
+      tft.drawCentreString("[1] -10     +10 [3]", 150, 137, 1);
+      tft.drawCentreString("[4] -2       +2 [6]", 150, 137 + 23, 1);
+      tft.drawCentreString("[7] -0.1   +0.1 [9]", 150, 137 + 23 + 23, 1);
+      tft.setTextColor(TFT_YELLOW, TFT_NAVY);
+      tft.setFreeFont(&FreeMonoBold12pt7b);
+
+      tft.drawCentreString("Press 0 to Finalize", 160, 212, 1);
       setFrequencyInMhz((float)selectedFrequencyViaKeypad / 1e6);
+      // setFrequencyInMhz(14.925);
     }
+
+    // --------------------------------------------------------------
+    // 🖲️ MPR121 Touch Handler: Apply SI5351 Calibration Corrections
+    // --------------------------------------------------------------
+    // This block is triggered on a touch interrupt. The pressed key
+    // is mapped from the keymapFKPF[] array. Keys 1/3, 4/6, 7/9 are
+    // used to increment or decrement the correction factor with
+    // different step sizes:
+    //    1 (-10000), 3 (+10000)
+    //    4 (-2500),  6 (+2500)
+    //    7 (-500),   9 (+500)
+    // The updated value is saved in Preferences and applied to the
+    // SI5351 PLL input using set_correction().
+    // --------------------------------------------------------------
 
     if (touchInterrupt)
     {
       touchInterrupt = false;
-
       uint16_t touched = cap.touched();
+
       for (uint8_t i = 0; i < 12; i++)
       {
         if (touched & (1 << i))
         {
           char key = keymapFKPF[i];
+
+          int delta = 0;
+          if (key == '1')
+            delta = 10000;
+          if (key == '3')
+            delta = -10000;
+          if (key == '4')
+            delta = 2000;
+          if (key == '6')
+            delta = -2000;
+          if (key == '7')
+            delta = 100;
+          if (key == '9')
+            delta = -100;
+
+          if (delta != 0)
+          {
+            cal_factor += delta;
+            preferences.putInt("cal_factor", cal_factor);
+            si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+
+            Serial.printf("📡 Calibration factor updated by %+d → New value: %d\n", delta, cal_factor);
+          }
+
           if (key == '0')
           {
-            Serial.println("🆗 Key 0 pressed!");
-            esp_restart(); // XXXXXXXXXXXXX  TO BE IMPROVED
+            Serial.println("🆗 Key 0 pressed! Restarting...");
             PowerSImoduleOFF();
-            displayMenu();
-            modeOfOperation = 6;
-            return;
+            displayMessageAndReboot();
           }
         }
       }
@@ -721,6 +759,7 @@ void loop()
     Serial.print(".");
     return;
   }
+
   // [10 for 3....] Frequency Input
   if (modeOfOperation == 10)
   {
@@ -744,66 +783,8 @@ void loop()
     }
   }
 
-  // KEYPAD HANDLING
-  // [mode 6] Menu
-  if (touchInterrupt && modeOfOperation == 6)
-  {
-    touchInterrupt = false;
 
-    uint16_t touched = cap.touched();
-    for (uint8_t i = 0; i < 12; i++)
-    {
-      if (touched & (1 << i))
-      {
-        char key = keymapFKPF[i];
-        if (key != lastKeyFKPF)
-        {
-          lastKeyFKPF = key;
-
-          if (key >= '0' && key <= '5')
-          {
-            Serial.print("🎯 Valid key pressed: ");
-            Serial.println(key);
-            alredyDisplayedOnce = false;
-            selectedModeOfOperation = key - '0'; // e.g., '4' - '0' = 4
-
-            if (selectedModeOfOperation == 3)
-            {
-              modeOfOperation = 10; // frequency input
-              titleForFrequencyInputScreen = "CW Beacon";
-              messageForFrequencyInputScreen = "Ensuring compliance with regulations!";
-              return;
-            }
-            if (selectedModeOfOperation == 4)
-            {
-              modeOfOperation = 10; // frequency input
-              titleForFrequencyInputScreen = "VFO";
-              messageForFrequencyInputScreen = "";
-              return;
-            }
-            if (selectedModeOfOperation == 1)
-            {
-              modeOfOperation = 1; // tuning
-              return;
-            }
-          }
-          else
-          {
-            Serial.print("🚫 Ignored key: ");
-            Serial.println(key);
-          }
-        }
-        break;
-      }
-    }
-    // Reset key tracking when no key is touched
-    if (cap.touched() == 0)
-    {
-      lastKeyFKPF = 0;
-    }
-  }
-
-  // Frequency Input
+// Frequency Input
   if (touchInterrupt && modeOfOperation == 10)
   {
     touchInterrupt = false;
@@ -834,6 +815,9 @@ void loop()
       }
     }
   }
+
+
+
 
   // ✅ Check if * is still being held → handle reboot BEFORE release
   if (starBeingHeldFKPF && (cap.touched() & (1 << 0)))
@@ -885,7 +869,169 @@ void loop()
   {
     lastKeyFKPF = 0;
   }
+
+  
+  // Main Menu Handling
+  // [mode 6] Menu
+  if (touchInterrupt && modeOfOperation == 9)
+  {
+    touchInterrupt = false;
+
+    uint16_t touched = cap.touched();
+    for (uint8_t i = 0; i < 12; i++)
+    {
+      if (touched & (1 << i))
+      {
+        char key = keymapFKPF[i];
+        if (key != lastKeyFKPF)
+        {
+          lastKeyFKPF = key;
+
+          if (key >= '0' && key <= '6')
+          {
+            // Serial.print("🎯 Valid key pressed: ");
+            // Serial.println(key);
+            alredyDisplayedOnce = false;
+            selectedModeOfOperation = key - '0'; // e.g., '4' - '0' = 4
+            if (selectedModeOfOperation == 0)
+            {
+              Serial.println("⚡ User pressed [0] ➜ Rebooting device 🔄");
+              displayMessageAndReboot();
+            }
+            if (selectedModeOfOperation == 2)
+            {
+              Serial.println("👉 User pressed [2] ➜ WSPR Mode 🌐");
+              displayWSPRmenu();
+              return;
+            }
+            if (selectedModeOfOperation == 3)
+            {
+              modeOfOperation = 10; // frequency input
+              Serial.println("👉 User pressed [3] ➜ CW Beacon Mode 🌐");
+
+              titleForFrequencyInputScreen = "CW Beacon";
+              messageForFrequencyInputScreen = "Ensuring compliance with regulations!";
+              return;
+            }
+            if (selectedModeOfOperation == 4)
+            {
+              modeOfOperation = 10; // frequency input
+              titleForFrequencyInputScreen = "VFO";
+              messageForFrequencyInputScreen = "";
+              return;
+            }
+            if (selectedModeOfOperation == 1)
+            {
+              modeOfOperation = 1; // tuning
+              return;
+            }
+            if (selectedModeOfOperation == 6)
+            {
+              displayAboutMessage();
+            }
+          }
+          else
+          {
+            Serial.print("🚫 Ignored key: ");
+            Serial.println(key);
+          }
+        }
+        break;
+      }
+    }
+    // Reset key tracking when no key is touched
+    if (cap.touched() == 0)
+    {
+      lastKeyFKPF = 0;
+    }
+  }
+
+  // WSPR Menu Handling
+  if (touchInterrupt && modeOfOperation == 22)
+  {
+    touchInterrupt = false;
+
+    uint16_t touched = cap.touched();
+    for (uint8_t i = 0; i < 12; i++)
+    {
+      if (touched & (1 << i))
+      {
+        char key = keymapFKPF[i];
+        if (key != lastKeyFKPF)
+        {
+          lastKeyFKPF = key;
+
+          if (key >= '1' && key <= '8')
+          {
+            selectedBandIndex = key - '1';
+            Serial.printf("👉 User pressed [%c] ➜ Band %s selected (index %d)\n", key, WSPRbandNames[selectedBandIndex], selectedBandIndex);
+            modeOfOperation = 2; // ✅ Switch to next operating mode
+          }
+          else if (key == '0')
+          {
+            Serial.println("🔚 Quit selected.");
+            displayMessageAndReboot();
+          }
+          else
+          {
+            Serial.print("🚫 Ignored key: ");
+            Serial.println(key);
+          }
+          break;
+        }
+      }
+    }
+  }
+
+
+
+
+
+
+  // ✅ Check if * is still being held → handle reboot BEFORE release
+  if (starBeingHeldFKPF && (cap.touched() & (1 << 0)))
+  {
+    unsigned long heldDuration = millis() - starPressedTimeFKPF;
+
+    if (heldDuration >= 2500)
+    {
+      Serial.println("♻️ Rebooting after long * press");
+
+      displayMessageAndReboot();
+    }
+  }
+
+  // 🧠 Handle key release
+  if (cap.touched() == 0 && starBeingHeldFKPF)
+  {
+    unsigned long heldDuration = millis() - starPressedTimeFKPF;
+
+    if (heldDuration >= 500)
+    {
+      Serial.println("🧹 Long * detected: clearing input");
+
+      tft.setTextColor(TFT_BLACK, TFT_BLACK);
+      tft.drawRightString(lastFormattedFKPF, tft.width() - RIGHT_MARGIN_FKPF, BASELINE_Y_FKPF, 7);
+
+      freqStrFKPF = "";
+      lastFormattedFKPF = "";
+    }
+    else
+    {
+      handleKey('*');
+    }
+
+    starBeingHeldFKPF = false;
+    lastKeyFKPF = 0;
+  }
+
+  // 🧼 Reset lastKeyFKPF if no pad is touched (safety)
+  if (cap.touched() == 0)
+  {
+    lastKeyFKPF = 0;
+  }
 }
+
 // ################################################################################################
 // Functions Implementation
 
@@ -1105,7 +1251,7 @@ void retrieveUserSettings()
   if (power_mW == 0)
   {
     Serial.println("⚠️ Power value not found! Setting default to 250 mW 🆕");
-    power_mW = 250;
+    power_mW = 1;
     preferences.putUInt("power", power_mW);
   }
   else
@@ -1158,53 +1304,94 @@ void retrieveUserSettings()
   }
   Serial.printf("📢 Calibration Factor: %d\n", cal_factor);
   Serial.println();
+
+  // 📡 Build dynamic CW beacon message
+  cwBeaconMessage = "VVV de ";
+  cwBeaconMessage += String(call);
+  cwBeaconMessage += "  LOCATOR IS ";
+  cwBeaconMessage += String(loc);
+  cwBeaconMessage += "  PWR IS ";
+  cwBeaconMessage += String(power_mW) + "mW";
+  cwBeaconMessage += " (" + String(dbm) + "dBm)";
+  cwBeaconMessage += "  ANT IS MAGNETIC LOOP";
+
+  Serial.println("🔔 CW Beacon message updated:");
+  Serial.println(cwBeaconMessage);
 }
+
 void connectToWiFi()
 {
   Serial.println("\n📡 Connecting to WiFi...");
-  WiFi.setHostname("HB9IIUtuner");
+
+  // 🧾 Configure device hostname before connection
+  WiFi.setHostname(hostname);
+
+  // 🔑 Begin WiFi connection using saved credentials
   WiFi.begin(ssid, password);
 
-  int rebootCount = preferences.getInt("rebootCount", 0);
-  int retries = 0;
+  preferences.begin("wifi", false);                       // 🔐 Open preferences under "wifi"
+  int rebootCount = preferences.getInt("rebootCount", 0); // Get previous reboot count
 
+  int retries = 0;
   while (WiFi.status() != WL_CONNECTED)
   {
-    delay(500);         // Faster animation
-    Serial.print("🔄"); // Connection attempt indicator
+    delay(500);          // ⏱️ Wait before checking again
+    Serial.print("📶 "); // Animation symbol to indicate waiting
     retries++;
 
+    // 💬 Show retry info on TFT after 3 failed attempts
+    if (retries > 3)
+    {
+      tft.setFreeFont(&FreeSans9pt7b);
+      String msg = "Retrying WiFi Connection (" + String(retries) + ")";
+      tft.setTextColor(TFT_RED);
+      tft.drawCentreString(msg, 160, 158, 1); // Draw in red
+
+      delay(500);
+
+      tft.setTextColor(TFT_BLACK); // Clear by overwriting
+      tft.drawCentreString(msg, 160, 158, 1);
+    }
+
+    // ❌ Too many retries, trigger reboot and handle persistent failure
     if (retries > 20)
     {
       Serial.println("\n❌ Failed to connect to WiFi! Please check credentials.");
-
       rebootCount++;
       preferences.putInt("rebootCount", rebootCount);
 
       if (rebootCount >= 3)
       {
         Serial.println("⚠️ Too many failures! Performing factory reset...");
-        preferences.clear();
-        preferences.putInt("rebootCount", 0);
+        preferences.clear();                  // Reset all stored preferences
+        preferences.putInt("rebootCount", 0); // Reset reboot counter
       }
 
-      preferences.end();
+      preferences.end(); // 🚪 Close preferences before reboot
       Serial.println("🔁 Rebooting now...");
       esp_restart();
     }
   }
 
-  // ✅ Connected Successfully
-  preferences.putInt("rebootCount", 0); // Reset counter
+  // ✅ Successfully connected
+  preferences.putInt("rebootCount", 0); // Reset reboot counter
+  preferences.end();                    // 🚪 Close preferences safely
+
   Serial.println("\n✅ WiFi Connected Successfully!");
+  tft.setTextColor(TFT_GREEN);
+  tft.drawCentreString("WiFi Connected Successfully!", 160, 158, 1);
+
+  Serial.print("📡 Connected to SSID: ");
+  Serial.println(WiFi.SSID());
+
   Serial.print("🌐 IP Address: ");
   Serial.println(WiFi.localIP());
 
+  // 📶 Print signal strength with friendly classification
   int rssi = WiFi.RSSI();
   Serial.print("📶 Signal Strength: ");
   Serial.print(rssi);
   Serial.print(" dBm - ");
-
   if (rssi >= -50)
     Serial.println("🏆 Excellent");
   else if (rssi >= -70)
@@ -1214,15 +1401,15 @@ void connectToWiFi()
   else
     Serial.println("🚫 Poor");
 
-  // 🌍 Start mDNS
-  if (!MDNS.begin("HB9IIUtuner"))
+  // 🌍 Start mDNS responder
+  if (!MDNS.begin(hostname))
   {
     Serial.println("❌ mDNS responder failed to start!");
   }
   else
   {
     Serial.println("✅ mDNS responder started!");
-    Serial.println("🔗 Access your device at: http://HB9IIUtuner.local");
+    Serial.printf("🔗 Access your device at: http://%s.local\n", hostname);
   }
 }
 void configure_web_server_routes()
@@ -1230,6 +1417,7 @@ void configure_web_server_routes()
   Serial.println("🌍 Starting Web Server Route Configuration...");
 
   // Route for root / web page
+  /*
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
             {
       Serial.println("📄 Route: / -> /index.html");
@@ -1240,7 +1428,7 @@ void configure_web_server_routes()
             {
       Serial.println("📄 Route: /index.html -> /index.html");
       request->send(SPIFFS, "/index.html", "text/html"); });
-
+*/
   // Route for diagnostic.html web page (same as above)
   server.on("/diagnostic.html", HTTP_GET, [](AsyncWebServerRequest *request)
             {
@@ -1442,7 +1630,8 @@ Serial.printf("📤 Sending Calibration Factor: %d\n", cal_factor);
 String cal_factor_str = String(cal_factor);
 
       request->send(200, "text/plain", cal_factor_str); });
-server.on("/sweepdata", HTTP_GET, [](AsyncWebServerRequest *request) {
+  server.on("/sweepdata", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
   DynamicJsonDocument doc(8192);
 
   // Coarse sweep data
@@ -1468,10 +1657,7 @@ server.on("/sweepdata", HTTP_GET, [](AsyncWebServerRequest *request) {
   // Send response
   String response;
   serializeJson(doc, response);
-  request->send(200, "application/json", response);
-});
-
-
+  request->send(200, "application/json", response); });
 
   server.begin();
   Serial.println("✅ Web Server Routes Configuration Completed!");
@@ -1497,6 +1683,9 @@ void updateNTPTime()
   // Try to update NTP time up to 10 times or until timeout
   while (attempts < 10)
   {
+
+    ;
+
     if (timeClient.update())
     {
       Serial.print("✅ NTP time updated successfully: ");
@@ -1514,8 +1703,15 @@ void updateNTPTime()
       Serial.print("⚠️ Failed to update NTP time. Retrying (Attempt ");
       Serial.print(attempts + 1);
       Serial.println("/10)...");
+
+      tft.setFreeFont(&FreeSans9pt7b);
+      String msg = "Failed to update NTP time. Retrying (" + String(attempts) + ")";
+      tft.setTextColor(TFT_RED);
+      tft.drawCentreString(msg, 160, 158, 1);
       initializeTimeClient(); // Re-initialize time client
       delay(2000);            // Wait before retrying
+      tft.setTextColor(TFT_BLACK);
+      tft.drawCentreString(msg, 160, 158, 1);
       attempts++;
     }
   }
@@ -1569,16 +1765,12 @@ void si5351_WarmingUp()
   Serial.println("🔥 Radio Module 'Warming Up' Started...");
 
   // 🎛️ Apply small random frequency offset (-100 to +100 Hz)
-  WSPR_TX_operatingFrequ = TX_referenceFrequ + (100ULL * random(-100, 100));
+
+  WSPR_TX_operatingFrequ = setRandomWSPRfrequency(selectedBandIndex); /// XXXXXX
 
   // 📡 Log the new TX frequency with formatting
   Serial.print("📶 Setting TX Frequency to: ");
-  printWithThousandsSeparator(WSPR_TX_operatingFrequ / 100);
-
-  // 🎙️ Determine the band name from the frequency (optional info)
-  std::string band = getBandFromFrequency(TX_referenceFrequ);
-  Serial.print("📻 Operating Band: ");
-  Serial.println(band.c_str());
+  printWithThousandsSeparator(WSPR_TX_operatingFrequ);
 
   // ⚙️ Configure Si5351 for transmission
   si5351.set_freq(WSPR_TX_operatingFrequ, SI5351_CLK0);
@@ -1707,68 +1899,111 @@ std::string getBandFromFrequency(uint32_t frequency)
 
   return "???"; // Frequency does not match any defined bands
 }
-
 void startAPMode()
 {
+  Serial.println("\n📡 Starting Access Point mode: 'MLA-TOOLBOX-CONFIG'");
 
-  // Start Access Point without password
-  Serial.println("\nStarting Access Point 'HB9IIU-WSPR-CONFIG'");
-
-  // Scan networks before starting the web server
-  Serial.println("Scanning Networks");
-
+  // Scan available Wi-Fi networks before launching the web interface
+  Serial.println("🔍 Scanning available Wi-Fi networks...");
   int numNetworks = WiFi.scanNetworks();
+
+  // Prepare JSON document to store scanned networks
   StaticJsonDocument<1024> doc;
   JsonArray networks = doc.createNestedArray("networks");
-  for (int i = 0; i < numNetworks; i++)
+
+  if (numNetworks == 0)
   {
-    JsonObject network = networks.createNestedObject();
-    network["ssid"] = WiFi.SSID(i);
-    network["rssi"] = WiFi.RSSI(i);
-    network["encryptionType"] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open" : "Secured";
+    Serial.println("⚠️ No Wi-Fi networks found.");
   }
+  else
+  {
+    Serial.printf("✅ %d network(s) found:\n", numNetworks);
+    for (int i = 0; i < numNetworks; i++)
+    {
+      String ssid = WiFi.SSID(i);
+      int rssi = WiFi.RSSI(i);
+      String enc = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "Open 🔓" : "Secured 🔐";
+
+      // Print details to Serial Monitor
+      Serial.printf("  📶 SSID: %-20s | RSSI: %4d dBm | Type: %s\n", ssid.c_str(), rssi, enc.c_str());
+
+      // Store in JSON
+      JsonObject network = networks.createNestedObject();
+      network["ssid"] = ssid;
+      network["rssi"] = rssi;
+      network["encryptionType"] = enc;
+    }
+  }
+
+  // Serialize to global buffer
   serializeJson(doc, scannedNetworksJson);
 
+  // Set Wi-Fi mode and start the AP
   WiFi.mode(WIFI_AP);
-  WiFi.softAP("HB9IIU-WSPR-CONFIG");
+  WiFi.softAP("MLA-TOOLBOX-CONFIG");
 
-  Serial.print("Access Point started, IP address: ");
-  Serial.println(WiFi.softAPIP());
+  IPAddress ip = WiFi.softAPIP();
+  Serial.printf("🚀 Access Point 'MLA-TOOLBOX-CONFIG' started\n");
+  Serial.printf("🌐 AP IP Address: %s\n", ip.toString().c_str());
 
-  // Route for ap.html
+  // Define web routes
+  Serial.println("🛠️ Setting up web server routes...");
+
+  // Serve main configuration page
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
             { request->send(SPIFFS, "/ap.html", "text/html"); });
 
-  server.on("/bootstrap/css/bootstrap.min.css", HTTP_GET, [](AsyncWebServerRequest *request)
-            { request->send(SPIFFS, "/bootstrap/css/bootstrap.min.css", "text/css"); });
+  // Serve Bootstrap CSS file
+  server.on("/bootstrap/bootstrap.min.css", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/bootstrap/bootstrap.min.css", "text/css"); });
 
-  server.on("/bootstrap/css/sticky-footer-navbar.css", HTTP_GET, [](AsyncWebServerRequest *request)
-            { request->send(SPIFFS, "/bootstrap/css/sticky-footer-navbar.css", "text/css"); });
-
-  // Route to get the list of available networks
+  // Serve scanned Wi-Fi networks as JSON
   server.on("/scanNetworks", HTTP_GET, [](AsyncWebServerRequest *request)
-            { request->send(200, "application/json", scannedNetworksJson); });
-
-  // Route to save selected SSID and username
-  server.on("/saveSelectedSSID", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-    if (request->hasParam("ssid") && request->hasParam("password")) {
-      String ssid = request->getParam("ssid")->value();
-      String password = request->getParam("password")->value();
-      preferences.putString("ssid", ssid);
-      preferences.putString("password", password);
-      Serial.printf("Selected SSID saved: %s\n", ssid.c_str());
-      Serial.printf("Password saved: %s\n", password.c_str());
-      request->send(200, "text/plain", "SSID and Username saved");
-      esp_restart();
-    } else {
-      request->send(400, "text/plain", "SSID or Username not provided");
-    } });
+              Serial.println("📡 Client requested scanned Wi-Fi networks (JSON)");
+              request->send(200, "application/json", scannedNetworksJson); });
 
-  // Start server
+  // Handle saving settings via POST (SSID, Password, Callsign, Locator)
+  server.on("/saveSettings", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
+            [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+            {
+              StaticJsonDocument<512> doc;
+              DeserializationError error = deserializeJson(doc, data);
+
+              if (error)
+              {
+                Serial.println("❌ Failed to parse JSON");
+                request->send(400, "text/plain", "Invalid JSON");
+                return;
+              }
+
+              String ssid = doc["ssid"] | "";
+              String password = doc["password"] | "";
+              String callsign = doc["callsign"] | "";
+              String locator = doc["locator"] | "";
+
+              preferences.putString("ssid", ssid);
+              preferences.putString("password", password);
+              preferences.putString("callsign", callsign);
+              preferences.putString("locator", locator);
+
+              Serial.println("💾 Settings saved to Preferences:");
+              Serial.printf("📶 SSID: %s\n", ssid.c_str());
+              Serial.printf("🔑 Password: %s\n", password.c_str());
+              Serial.printf("📡 Callsign: %s\n", callsign.c_str());
+              Serial.printf("🌍 Locator: %s\n", locator.c_str());
+
+              request->send(200, "text/plain", "Settings saved. Rebooting...");
+
+              delay(500); // Let browser receive response
+              esp_restart();
+            });
+
+  // Start the web server
   server.begin();
-  Serial.println("Server started.");
+  Serial.println("✅ AP Web server started and ready to serve at http://192.168.4.1 ⚙️");
 }
+
 
 // ########################## RELATED TO TUNER ####################################
 
@@ -2030,12 +2265,12 @@ unsigned long findResonanceFrequency()
   bool verbose = true;
 
   const unsigned long coarseStartHz = 9000000UL;
-  const unsigned long coarseEndHz   = 20000000UL;
-  const unsigned long coarseStepHz  = 50000UL;
+  const unsigned long coarseEndHz = 20000000UL;
+  const unsigned long coarseStepHz = 50000UL;
 
   const unsigned long fineSpanHz = 400000UL;
   const unsigned long fineStepHz = 1000UL;
-   int fineAdcSamples = 1;
+  int fineAdcSamples = 1;
 
   int frequChangeDelay = 1;
   int sweepCounter = 0;
@@ -2048,21 +2283,24 @@ unsigned long findResonanceFrequency()
   si5351.set_clock_pwr(SI5351_CLK0, 1);
 
   // === COARSE SWEEP ===
-  if (verbose) Serial.println("---COARSE_START---");
+  if (verbose)
+    Serial.println("---COARSE_START---");
 
   for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
   {
     si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, 1);
-    //Serial.printf("COARSE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
+    // Serial.printf("COARSE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
 
-    if (tempCount < MAX_SWEEP_POINTS) {
+    if (tempCount < MAX_SWEEP_POINTS)
+    {
       tempFreq[tempCount] = freqHz;
       tempAdc[tempCount] = adcValue;
       tempCount++;
 
-      if (adcValue < minAdcValue) {
+      if (adcValue < minAdcValue)
+      {
         minAdcValue = adcValue;
       }
     }
@@ -2072,48 +2310,55 @@ unsigned long findResonanceFrequency()
   coarsePeakAdc = 0;
   coarsePeakFreq = 0;
 
-  for (int i = 0; i < tempCount; i++) {
+  for (int i = 0; i < tempCount; i++)
+  {
     coarse_sweep_frequ[i] = tempFreq[i];
     coarse_sweep_adc[i] = tempAdc[i];
 
-    if (tempAdc[i] > coarsePeakAdc) {
+    if (tempAdc[i] > coarsePeakAdc)
+    {
       coarsePeakAdc = tempAdc[i];
       coarsePeakFreq = tempFreq[i];
     }
   }
 
-  if (verbose) {
+  if (verbose)
+  {
     Serial.printf("🟨 COARSE_MAX_ADC: %d at %lu Hz\n", coarsePeakAdc, coarsePeakFreq);
     Serial.println("---COARSE_END---");
   }
 
   // === FINE SWEEP ===
-  if (verbose) Serial.println("---FINE_START---");
-fineAdcSamples = 3;
+  if (verbose)
+    Serial.println("---FINE_START---");
+  fineAdcSamples = 3;
   tempCount = 0;
-  for (int i = 0; i < MAX_SWEEP_POINTS; i++) {
+  for (int i = 0; i < MAX_SWEEP_POINTS; i++)
+  {
     tempFreq[i] = 0;
     tempAdc[i] = 0;
   }
 
-  unsigned long fineStartHz = coarsePeakFreq - fineSpanHz/2;
-  unsigned long fineStopHz  = coarsePeakFreq + fineSpanHz/2;
+  unsigned long fineStartHz = coarsePeakFreq - fineSpanHz / 2;
+  unsigned long fineStopHz = coarsePeakFreq + fineSpanHz / 2;
 
-  //Serial.printf("🟨 FINE SWEEP from %lu to %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, fineStepHz);
+  // Serial.printf("🟨 FINE SWEEP from %lu to %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, fineStepHz);
 
   for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += fineStepHz)
   {
     si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
-    //Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
+    // Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
 
-    if (tempCount < MAX_SWEEP_POINTS) {
+    if (tempCount < MAX_SWEEP_POINTS)
+    {
       tempFreq[tempCount] = freqHz;
       tempAdc[tempCount] = adcValue;
       tempCount++;
 
-      if (adcValue < minAdcValue) {
+      if (adcValue < minAdcValue)
+      {
         minAdcValue = adcValue;
       }
     }
@@ -2123,23 +2368,27 @@ fineAdcSamples = 3;
   finePeakAdc = 0;
   finePeakFreq = 0;
 
-  for (int i = 0; i < tempCount; i++) {
+  for (int i = 0; i < tempCount; i++)
+  {
     fine_sweep_frequ[i] = tempFreq[i];
     fine_sweep_adc[i] = tempAdc[i];
 
-    if (tempAdc[i] > finePeakAdc) {
+    if (tempAdc[i] > finePeakAdc)
+    {
       finePeakAdc = tempAdc[i];
       finePeakFreq = tempFreq[i];
     }
   }
 
-  if (verbose) {
+  if (verbose)
+  {
     Serial.printf("🟨 FINE_MAX_ADC: %d at %lu Hz\n", finePeakAdc, finePeakFreq);
     Serial.println("---FINE_END---");
   }
 
   // Summary
-  if (verbose) {
+  if (verbose)
+  {
     Serial.println("---SUMMARY---");
     Serial.printf("🟨 NOISE_FLOOR: %d\n", minAdcValue);
     Serial.printf("🟨 DELTA: %d\n", finePeakAdc - minAdcValue);
@@ -2379,12 +2628,8 @@ void updateDisplay()
         if (key == '0')
         {
           Serial.println("🆗 Key 0 pressed!");
-          esp_restart(); // XXXXXXXXXXXXXXX TO BE IMPROVED
-          stopCWbeacon = true;
           PowerSImoduleOFF();
-          displayMenu();
-          modeOfOperation = 6;
-          return;
+          displayMessageAndReboot();
         }
       }
     }
@@ -2542,62 +2787,58 @@ void handleKey(char key)
   }
 }
 
-void rebootESP()
-{
-  tft.fillScreen(TFT_NAVY);
-  tft.setFreeFont(&Orbitron_Light_32);
-  tft.setTextSize(2);
-  for (int i = 0; i < 5; i++)
-  {
-    tft.setTextColor(TFT_YELLOW, TFT_NAVY);
-    tft.drawCentreString("Rebooting", 160, 120 - 24, 4);
-    delay(150);
-    tft.setTextColor(TFT_NAVY, TFT_NAVY);
-    tft.drawCentreString("Rebooting", 160, 120 - 24, 4);
-    delay(150);
-  }
-  esp_restart();
-}
-
 void PowerSImoduleOFF()
 {
   si5351.set_clock_pwr(SI5351_CLK0, 0); // Power OFF
   Serial.println("🔌 SI5351 CLK0 powered OFF");
 }
 
-void displayMenu()
+void displayMainMenu()
 {
+  // 🔹 Header and screen setup
   tft.fillScreen(TFT_NAVY);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
   tft.fillRect(0, 0, 320, 30, TFT_BLACK);
   tft.drawCentreString("MLA Toolbox Menu", 160, 4, 4);
+
+  // 🔹 Subtitle
+  tft.setTextColor(TFT_GOLD, TFT_NAVY);
+  tft.setFreeFont(&FreeMonoBold12pt7b);
+  tft.drawCentreString("Select Operating mode", 160, 40, 1);
+
+  // 🔹 Menu options
+  const char *menuItems[] = {
+      "[1] MLA Tuning",
+      "[2] WSPR Transmitter",
+      "[3] CW Beacon",
+      "[4] VFO",
+      "[5] Diagnostic",
+      "[6] About",
+      "[0] Reboot"};
+
+  tft.setFreeFont(&FreeMono9pt7b);
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
-  int x = 7;                           // Left margin
-  int y = 90;
+  int x = 12;
+  int y = 65;
   int lineGap = 24;
-  y = 40;
-  tft.drawString("Select Operating mode:", x, y);
-  y += lineGap + 5;
-  tft.drawString("[1] MLA Tuning", x, y);
-  y += lineGap;
-  tft.drawString("[2] WSPR Transmitter", x, y);
-  y += lineGap;
-  tft.drawString("[3] CW Beacon", x, y);
-  y += lineGap;
-  tft.drawString("[4] VFO", x, y);
-  y += lineGap;
-  tft.drawString("[5] Diagnostic", x, y);
-  y += lineGap;
-  tft.drawString("[6] About", x, y);
-  y += lineGap;
-  tft.drawString("[0] Reboot", x, y);
-  tft.setTextFont(1); // Select FONT1 (Adafruit 8px)
+
+  for (uint8_t i = 0; i < sizeof(menuItems) / sizeof(menuItems[0]); i++)
+  {
+    tft.drawString(menuItems[i], x, y);
+    y += lineGap;
+  }
+
+  // 🔹 Footer: Version
+  tft.setTextFont(1); // FONT1 = 8px
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_NAVY);
   tft.drawRightString(String("Version: ") + VERSION, 300, 220, 1);
-}
 
+  // 🔹 Console output and state
+  Serial.println("\n🧭 Waiting for user to select a main menu option (keys 0–6)...");
+  modeOfOperation = 9; // Main menu handling
+  Serial.println(APmode);
+}
 
 bool initSI5351()
 {
@@ -2634,4 +2875,158 @@ bool initSI5351()
   si5351.set_clock_pwr(SI5351_CLK0, 0);
 
   return true;
+}
+
+void displayMessageAndReboot()
+{
+
+  tft.fillScreen(TFT_BLACK);
+
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_GOLD, TFT_BLACK);
+
+  tft.setFreeFont(&Orbitron_Light_32);
+  tft.drawCentreString("73! de HB9IIU", 160, 150, 1);
+
+  tft.setTextSize(1);
+  for (int i = 0; i < 5; i++)
+  {
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawCentreString("REBOOTING", 160, 60, 1);
+    delay(120);
+    tft.setTextColor(TFT_BLACK, TFT_BLACK);
+    tft.drawCentreString("REBOOTING", 160, 60, 1);
+    delay(120);
+  }
+
+  tft.flush();
+
+  ESP.restart();
+}
+
+void displayAboutMessage()
+{
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_GOLD, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM); // Top-left corner
+  tft.setCursor(100, 0);
+  tft.setTextSize(2);
+  tft.setTextFont(2); // Smallest font
+  tft.println("MLA ToolBox");
+  tft.setCursor(0, 30);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+
+  tft.setTextFont(2);
+
+  tft.println(" In Active & Continuous development:");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+
+  tft.println("  - New features appear anytime");
+  tft.println("  - Bugs might sneak in ...");
+  tft.println("  - Forgive the quirks, enjoy the ride!");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.println("   Free & open for all tinkerers and builders.");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+
+  tft.println("   Enjoy, share, and report bugs:");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.println("   http://github.com/HB9IIU/ESP32-MLA-Toolbox");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.println("   Tuning is Science + Magic = Fun!!");
+  tft.setTextFont(1);
+  tft.println();
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.println("       73! de HB9IIU");
+  delay(10000);
+  displayMessageAndReboot();
+}
+
+void displayWSPRmenu()
+{
+  // Clear screen and draw title bar
+  tft.fillScreen(TFT_NAVY);
+  tft.setTextColor(TFT_YELLOW);
+  tft.fillRect(0, 0, 320, 30, TFT_BLACK);
+  tft.drawCentreString("WSPR MODE", 160, 4, 4);
+
+  // Section title
+  tft.setFreeFont(&FreeMonoBold12pt7b);
+  tft.setTextColor(TFT_GOLD);
+  int y = 36;
+  tft.drawCentreString("Select WSPR band", 160, y, 1);
+
+  // Band list
+  tft.setTextColor(TFT_WHITE);
+  y += 24;
+  tft.setFreeFont(&FreeMono9pt7b);
+  int x = 26;
+  int lineGap = 19;
+
+  for (byte i = 0; i < numWSPRbands; i++)
+  {
+    unsigned long centerFreqHz = (WSPRbandStart[i] + WSPRbandEnd[i]) / 2;
+
+    // Inlined formatter (same logic as formatFrequencyHz)
+    char freqStr[14]; // 13 chars + null terminator
+    unsigned long millions = centerFreqHz / 1000000;
+    unsigned long thousands = (centerFreqHz / 1000) % 1000;
+    unsigned long units = centerFreqHz % 1000;
+    sprintf(freqStr, "%2lu.%03lu.%03lu Hz", millions, thousands, units);
+
+    // Final line output
+    char line[50];
+    sprintf(line, "[%d] %-4s (%s)", i + 1, WSPRbandNames[i], freqStr);
+    tft.drawString(line, x, y);
+    y += lineGap;
+  }
+  // Quit instruction
+  y += 10;
+  tft.setTextColor(TFT_GOLD);
+  tft.drawCentreString("Press [0] to Quit", 160, y - 6, 1);
+  modeOfOperation = 22; // wspr menu keypad
+  Serial.println("\n🕹️ Waiting for user to select WSPR band (keys 1–8, 0 = Quit)...");
+}
+
+// ✅ Returns a randomized safe WSPR transmit frequency for a given band index
+unsigned long setRandomWSPRfrequency(byte bandIndex)
+{
+  unsigned long officialStart = WSPRbandStart[bandIndex];
+  unsigned long officialEnd = WSPRbandEnd[bandIndex];
+  unsigned long minF = officialStart + 3;
+  unsigned long maxF = officialEnd - 3;
+
+  unsigned long freq = random(minF, maxF + 1); // inclusive range
+
+  Serial.printf("🎯 Selected random freq within available range:  %lu Hz\n", freq);
+
+  return freq;
+}
+// ✅ Returns selected WSPR band information
+void displaySelecetdBandInformation(byte bandIndex)
+{
+  unsigned long officialStart = WSPRbandStart[bandIndex];
+  unsigned long officialEnd = WSPRbandEnd[bandIndex];
+  unsigned long minF = officialStart + 3;
+  unsigned long maxF = officialEnd - 3;
+  Serial.println();
+  Serial.println("📶 --- WSPR Transmission Setup --------------------------------------");
+  Serial.printf("🔹 Band:           %s\n", WSPRbandNames[bandIndex]);
+  Serial.printf("🔹 Sub-band:       %lu – %lu Hz\n", officialStart, officialEnd);
+  Serial.printf("🔹 Usable range:   %lu – %lu Hz (excludes ±3 Hz edges)\n", minF, maxF);
+  Serial.println("📏 Bandwidth used: ~6 Hz centered around selected frequency");
+  Serial.println("---------------------------------------------------------------------");
+  Serial.println();
 }
