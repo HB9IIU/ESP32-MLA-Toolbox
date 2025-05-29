@@ -39,7 +39,7 @@ int fineSweepCount = 0;
 unsigned long resonanceFrequ = 0;
 int bestAdcAtSweep = 0;
 int noiseFloor = 4096; // initial max ADC value (12-bit ADC max 4095)
-
+int range = 0;
 // Global resonance peak results for both coarse and fine sweeps
 int coarsePeakFreq = 0;
 int coarsePeakAdc = 0;
@@ -104,7 +104,7 @@ void setFrequencyInMhz(float freqMHz);
 unsigned long findResonanceFrequency();
 bool initSI5351();
 byte selectedBandIndex;
-
+bool drawTuningScreenFirstTime = true;
 String formatFrequencyWithDots(unsigned freq);
 
 // related to web server
@@ -146,6 +146,7 @@ void handleKey(char key);
 // Helpers
 void displayMessageAndReboot();
 void displayAboutMessage();
+void checkIfAPmodeIsRequiredForFirstTimeConfig();
 
 // Global Variables for meter
 #define M_SIZE 1.3333   // Meter size scale factor for rotation(1)
@@ -196,26 +197,6 @@ WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "time-a-g.nist.gov");
 
 int modeOfOperation = 0;
-
-const unsigned long long WSPRbandStartFrequencies[] = {
-    356860000ULL,  // 80 m -> 3.568.600 Hz
-    528720000ULL,  // 60 m -> 5.287.200 Hz
-    703860000ULL,  // 40 m -> 7.038.600 Hz
-    1013870000ULL, // 30 m -> 10.138.700 Hz
-    1409560000ULL, // 20 m -> 14.095.600 Hz
-    1810460000ULL, // 17 m -> 18.104.600 Hz
-    2109460000ULL, // 15 m -> 21.094.600 Hz
-    2492460000ULL, // 12 m -> 24.924.600 Hz
-    2812460000ULL, // 10 m -> 28.124.600 Hz
-    50393000ULL    // 6 m  -> 50.293.000 Hz
-};
-
-// Dynamic array to store selected frequencies
-// unsigned long long *scheduleFrequencies = nullptr;
-// int selectedCount = 0;
-// int loopIndex = 0;
-
-// Frequency used for transmission
 
 // Timing variables
 volatile bool isFirstIteration = true;
@@ -282,16 +263,16 @@ void setup()
 
   displayPNGfromSPIFFS("splash.png", 0); // will stay on enough time due to next steps
 
+  bool debugAP = false;
+
   // 🧠 Initialize Preferences (non-volatile storage) with namespace "settings"
   preferences.begin("settings", false); // false = read/write mode
 
   // 📦 Try to retrieve stored WiFi credentials from Preferences
   String storedSSID = preferences.getString("ssid", "");
   String storedPassword = preferences.getString("password", "");
-
-bool debugAP = false;
-// 🕵️‍♂️ Check if credentials are available or AP debug mode is enabled
-if (storedSSID == "" || storedPassword == "" || debugAP)
+  // 🕵️‍♂️ Check if credentials are available or AP debug mode is enabled
+  if (storedSSID == "" || storedPassword == "" || debugAP)
   {
     // ❌ No credentials found
     Serial.println("⚠️  No stored Wi-Fi credentials found (or debug mode).");
@@ -369,107 +350,6 @@ if (storedSSID == "" || storedPassword == "" || debugAP)
   {
     startAPMode();
   }
-
-  /*
-  drawAnalogMeter();
-
-  meterStartUpAnimation();
-
-  displayMessageAtBottom("Determining Current Resonance Frequency", 200);
-  displayMessageAtBottom("Please Wait.....", 220);
-
-  resonanceFrequ = findResonanceFrequency();
-
-  String s = String(resonanceFrequ);
-  int len = s.length();
-
-  // Insert dots every 3 digits from the right
-  for (int i = len - 3; i > 0; i -= 3)
-  {
-    s = s.substring(0, i) + "." + s.substring(i);
-  }
-
-  // Clear the previous message area
-  tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);          // Foreground and background color
-
-  tft.drawCentreString(s, 160, 180, 7);
-  delay(3000);
-  tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
-  tft.drawCentreString("Enter Target Frequency", 160, 175, 4);
-  tft.drawCentreString("and press #", 160, 210, 4);
-
-  delay(0);
-  tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
-
-  //}
-
-  displayFrequAtBottom(resonanceFrequ, 1, 220);
-  displayFrequAtBottom(14000000, 2, 220);
-
-  setFrequencyInMhz(14.0971);
-  modeOfOperation = 0;
-  // ###############################################################################################
-
-  // CW BEACON
-  cwDitDurationMs = 1200 / cwWPM;
-
-  tft.fillScreen(TFT_NAVY);     // Background navy blue
-  tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
-  tft.fillRect(0, 0, 320, 30, TFT_DARKGREY);
-  tft.drawCentreString("CW Beacon", 160, 4, 4);
-  tft.setTextColor(TFT_WHITE); // Text color white, no background fill
-
-  // tft.setTextDatum(TC_DATUM);  // Top-Center datum if you want centered text
-  tft.drawCentreString("14.345.789", 160, 55, 7); // Centered horizontally at X=160
-
-  setFrequencyInMhz(14.345);
-  tft.setFreeFont();
-
-  delay(0);
-
-  modeOfOperation = 2;
-
-  // VFO
-  // Title Box
-  tft.fillScreen(TFT_NAVY);     // Background navy blue
-  tft.setTextColor(TFT_YELLOW); // Text color white, no background fill
-  tft.fillRect(0, 0, 320, 30, TFT_DARKGREY);
-  tft.drawCentreString("VFO & Calibration", 160, 4, 4);
-  tft.setTextColor(TFT_WHITE);         // Text color white, no background fill
-  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
-
-  tft.setTextColor(TFT_WHITE, TFT_NAVY); // Foreground and background color
-
-  tft.drawCentreString("14.345.789", 160, 35, 7); // Centered horizontally at X=160
-
-
-  tft.setFreeFont(&FreeMonoBold9pt7b); // Use FreeFont 2 (example: FreeSans9pt7b)
-  int x = 10;                          // Left margin
-  int y = 90;                          // Starting Y position
-  int lineGap = 16;                    // Default vertical gap between lines
-  tft.setTextDatum(TL_DATUM);          // Top-left alignment
-  tft.drawString("Calibrating Output Frequency...", x, y);
-  y += lineGap + 8;
-
-  tft.drawString("1. Tune your transceiver to", x, y);
-  y += lineGap;
-  tft.drawString("   the indicated frequency", x, y);
-  y += lineGap + 8;
-
-  tft.drawString("2. Adjust using keys:", x, y);
-  y += lineGap + 3;
-  tft.drawString("  [1] Increase Frequency", x, y);
-  y += lineGap + 3;
-  tft.drawString("  [3] Decrease Frequency", x, y);
-  y += lineGap + 8;
-  tft.drawString("3. Press [#] when done", x, y);
-  modeOfOperation = 3;
-  delay(0);
-
-
-*/
-  // MENU
 }
 
 // ################################################################################################
@@ -477,8 +357,8 @@ if (storedSSID == "" || storedPassword == "" || debugAP)
 
 void loop()
 {
-  
-  if (APmode==true)
+
+  if (APmode == true)
   {
     delay(100);
     return;
@@ -498,65 +378,57 @@ void loop()
 
   {
 
-    // drawAnalogMeter();
-    tft.fillScreen(TFT_BLACK);
-    // meterStartUpAnimation();
+    if (drawTuningScreenFirstTime == true)
+    {
+      tft.fillScreen(TFT_BLACK);
+      drawAnalogMeter();
+      meterStartUpAnimation();
 
-    // displayMessageAtBottom("Determining Current Resonance Frequency", 200);
-    // displayMessageAtBottom("Please Wait.....", 220);
-    // delay(5000);
-    resonanceFrequ = findResonanceFrequency();
-
-    // Clear the previous message area
-    tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
-    tft.setTextColor(TFT_WHITE, TFT_BLACK);          // Foreground and background color
-
-    tft.drawCentreString(formatFrequencyWithDots(resonanceFrequ), 160, 180, 7);
-    // delay(3000);
-    // tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
-    // tft.drawCentreString("Enter Target Frequency", 160, 175, 4);
-    /// tft.drawCentreString("and press #", 160, 210, 4);
-
-    // delay(0);
-    // tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
-
-    //}
+      tft.setTextColor(TFT_GOLD, TFT_BLACK); // Text color and background color (optional)
+      tft.setFreeFont(&FreeSans12pt7b);
+      tft.drawCentreString("Resonance Frequency", 160, 170, 1); // 160 is center X for a 320 px wide display
+      tft.drawCentreString("Determination", 160, 170 + 27, 1);  // 160 is center X for a 320 px wide display
+      tft.setFreeFont(&FreeSans9pt7b);
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);                     // Text color and background color (optional)
+      tft.drawCentreString("Please Wait", 160, 172 + 27 + 24, 1); // 160 is center X for a 320 px wide display
+      resonanceFrequ = findResonanceFrequency();
+      tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Clear the previous message area
+      tft.setTextColor(TFT_WHITE, TFT_BLACK);
+      tft.drawCentreString(formatFrequencyWithDots(resonanceFrequ), 160, 180, 7);
+      drawTuningScreenFirstTime = false;
+ delay(2000);
+      tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
+      selectedFrequencyViaKeypad = 14180000;
+      setFrequencyInMhz((float)selectedFrequencyViaKeypad / 1e6);
+     
+    }
     /*
-      displayFrequAtBottom(resonanceFrequ, 1, 220);
-      displayFrequAtBottom(14000000, 2, 220);
+             resonanceFrequ = finePeakFreq;
+      bestAdcAtSweep = finePeakAdc;
+      noiseFloor = minAdcValue;
+      range=finePeakAdc-minAdcValue;
+    */
 
-        int adcValue = readAveragedAdc(ADC_PIN, 1);
+    int adcValue = readAveragedAdc(ADC_PIN, 1);
+    int inRange = adcValue - noiseFloor;
 
-        if (adcValue > bestAdcAtSweep)
-        {
+    float percentage = (float)inRange / range * 100.0;
 
-          range = adcValue - noiseFloor;
-        }
-        int inRange = adcValue - noiseFloor;
-        if (inRange < 0)
-        {
-          inRange = 0;
-        }
+    Serial.print("inRange: ");
+    Serial.print(inRange);
+    Serial.print("    ");
 
-        float percentage = (float)inRange / range * 100.0;
+    Serial.print("range: ");
+    Serial.print(range);
+    Serial.print("    ");
 
-        Serial.print("inRange: ");
-        Serial.print(inRange);
-        Serial.print("    ");
+    int percentageIntRounded = round(percentage);
+    Serial.print("percentage: ");
+    Serial.println(percentageIntRounded); // Display with 2 decimal places
 
-        Serial.print("range: ");
-        Serial.print(range);
-        Serial.print("    ");
+    plotNeedle(percentageIntRounded);
+    refreshVUmeter(percentageIntRounded);
 
-        int percentageIntRounded = round(percentage);
-        Serial.print("percentage: ");
-        Serial.println(percentageIntRounded); // Display with 2 decimal places
-
-        // findResonancePeak();
-
-        plotNeedle(percentageIntRounded);
-        refreshVUmeter(percentageIntRounded);
-        */
     return;
   }
 
@@ -584,7 +456,6 @@ void loop()
 
     Serial.print("Next 'even minute' time: ");
     Serial.println(convertPosixToHHMMSS(nextPosixTxTime));
-    TX_referenceFrequ = WSPRbandStartFrequencies[4];
 
     displaySelecetdBandInformation(selectedBandIndex);
 
@@ -783,8 +654,7 @@ void loop()
     }
   }
 
-
-// Frequency Input
+  // Frequency Input
   if (touchInterrupt && modeOfOperation == 10)
   {
     touchInterrupt = false;
@@ -815,9 +685,6 @@ void loop()
       }
     }
   }
-
-
-
 
   // ✅ Check if * is still being held → handle reboot BEFORE release
   if (starBeingHeldFKPF && (cap.touched() & (1 << 0)))
@@ -870,7 +737,6 @@ void loop()
     lastKeyFKPF = 0;
   }
 
-  
   // Main Menu Handling
   // [mode 6] Menu
   if (touchInterrupt && modeOfOperation == 9)
@@ -965,6 +831,8 @@ void loop()
           {
             selectedBandIndex = key - '1';
             Serial.printf("👉 User pressed [%c] ➜ Band %s selected (index %d)\n", key, WSPRbandNames[selectedBandIndex], selectedBandIndex);
+            // zzzzzz
+            TX_referenceFrequ = WSPRbandStart[selectedBandIndex];
             modeOfOperation = 2; // ✅ Switch to next operating mode
           }
           else if (key == '0')
@@ -982,11 +850,6 @@ void loop()
       }
     }
   }
-
-
-
-
-
 
   // ✅ Check if * is still being held → handle reboot BEFORE release
   if (starBeingHeldFKPF && (cap.touched() & (1 << 0)))
@@ -1412,256 +1275,259 @@ void connectToWiFi()
     Serial.printf("🔗 Access your device at: http://%s.local\n", hostname);
   }
 }
+
 void configure_web_server_routes()
 {
   Serial.println("🌍 Starting Web Server Route Configuration...");
 
-  // Route for root / web page
-  /*
+  // Root and static pages
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      Serial.println("📄 Route: / -> /index.html");
-      request->send(SPIFFS, "/index.html", "text/html"); });
+    Serial.println("📄 Route: / -> /index.html");
+    request->send(SPIFFS, "/index.html", "text/html"); });
 
-  // Route for index.html web page (same as above)
   server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      Serial.println("📄 Route: /index.html -> /index.html");
-      request->send(SPIFFS, "/index.html", "text/html"); });
-*/
-  // Route for diagnostic.html web page (same as above)
+    Serial.println("📄 Route: /index.html -> /index.html");
+    request->send(SPIFFS, "/index.html", "text/html"); });
+
   server.on("/diagnostic.html", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      Serial.println("📄 Route: /diagnostic.html -> /diagnostic.html");
-      request->send(SPIFFS, "/diagnostic.html", "text/html"); });
+    Serial.println("📄 Route: /diagnostic.html -> /diagnostic.html");
+    request->send(SPIFFS, "/diagnostic.html", "text/html"); });
 
+  server.on("/calibrate.html", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("🔧 Route: /calibrate.html -> Calibration Mode");
+    request->send(SPIFFS, "/calibrate.html", "text/html"); });
+
+  server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("🔖 Route: /favicon.ico");
+    request->send(SPIFFS, "/favicon.ico", "image/x-icon"); });
+
+  // Static assets
+  server.on("/assets/spectrum.jpg", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("🖼️ Route: /assets/spectrum.jpg");
+    request->send(SPIFFS, "/assets/spectrum.jpg", "image/jpeg"); });
+
+  server.on("/assets/wsprlogo.png", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("🖼️ Route: /assets/wsprlogo.png");
+    request->send(SPIFFS, "/assets/wsprlogo.png", "image/png"); });
+
+  server.on("/assets/warning.png", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("🖼️ Route: /assets/warning.png");
+    request->send(SPIFFS, "/assets/warning.png", "image/png"); });
+
+  server.on("/cesium.key", HTTP_GET, [](AsyncWebServerRequest *request)
+            { request->send(SPIFFS, "/cesium.key", "text/plain"); });
+
+  // 🔧 Settings and data endpoints
   server.on("/getAllSettings", HTTP_GET, [](AsyncWebServerRequest *request)
             {
+    preferences.begin("settings", true);
     StaticJsonDocument<256> doc;
     doc["version"] = "Ver. " + String(VERSION);
     doc["callsign"] = preferences.getString("callsign", "");
     doc["locator"] = preferences.getString("locator", "");
     doc["power"] = preferences.getUInt("power", 24);
-    doc["TX_referenceFrequ"] = TX_referenceFrequ;             
-    doc["WSPR_TX_operatingFrequ"] = WSPR_TX_operatingFrequ;  
-
-    
+    doc["TX_referenceFrequ"] = TX_referenceFrequ;
+    doc["WSPR_TX_operatingFrequ"] = WSPR_TX_operatingFrequ;
     doc["scheduleState"] = preferences.getString("scheduleState", "schedule1");
+    preferences.end();
 
     String json;
     serializeJson(doc, json);
     request->send(200, "application/json", json); });
 
-  // Route to update schedule button state
-  server.on("/updateScheduleState", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-    if (request->hasParam("id")) {
-        String scheduleState = request->getParam("id")->value();
-        preferences.putString("scheduleState", scheduleState);
-          if (scheduleState == "schedule1") intervalBetweenTx = 2 * 60;
-  else if (scheduleState == "schedule2") intervalBetweenTx = 4 * 60;
-  else if (scheduleState == "schedule3") intervalBetweenTx = 6 * 60;
-  else if (scheduleState == "schedule4") intervalBetweenTx = 8 * 60;
-  else if (scheduleState == "schedule5") intervalBetweenTx = 10 * 60;
-  else intervalBetweenTx = 2 * 60;
-  Serial.printf("📅 New schedule selected: %s ➡️ Interval set to %d minutes\n", scheduleState.c_str(), intervalBetweenTx / 60);
-isFirstIteration=true;
-interruptWSPRcurrentTX=true;
-
-    } else {
-        Serial.println("⚠️ No schedule ID received!");
-    }
-    request->send(200, "text/plain", "OK"); });
-
-  // Route for calibration web page
-  server.on("/calibrate.html", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      Serial.println("🔧 Route: /calibrate.html -> Calibration Mode");
-
-      request->send(SPIFFS, "/calibrate.html", "text/html"); });
-
-  // Static files: Images
-  server.on("/assets/spectrum.jpg", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      Serial.println("🖼️ Route: /assets/spectrum.jpg");
-      request->send(SPIFFS, "/assets/spectrum.jpg", "image/jpeg"); });
-
-  server.on("/assets/wsprlogo.png", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      Serial.println("🖼️ Route: /assets/wsprlogo.png");
-      request->send(SPIFFS, "/assets/wsprlogo.png", "image/png"); });
-
-  server.on("/assets/warning.png", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      Serial.println("🖼️ Route: /assets/warning.png");
-      request->send(SPIFFS, "/assets/warning.png", "image/png"); });
-
-  server.on("/cesium.key", HTTP_GET, [](AsyncWebServerRequest *request)
-            { request->send(SPIFFS, "/cesium.key", "text/plain"); });
-
-  // Favicon
-  server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      Serial.println("🔖 Route: /favicon.ico");
-      request->send(SPIFFS, "/favicon.ico", "image/x-icon"); });
-
-  // API Endpoints - State Management
-
-  server.on("/getTimes", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-Serial.printf("📤 Sending WSPR Timing Info to web page (TX = %d s, Next = %d s)\n", tx_ON_running_time_in_s, currentRemainingSeconds);
-      StaticJsonDocument<128> doc;
-      doc["currentRemainingSeconds"] = currentRemainingSeconds;
-      doc["txRunningTime"] = tx_ON_running_time_in_s;
-      doc["TX_referenceFrequ"] = TX_referenceFrequ / 100;
-      doc["intervalBetweenTx"] = intervalBetweenTx;  
-      String json;
-      serializeJson(doc, json);
-      request->send(200, "application/json", json); });
-
-  // Callsign & Locator Management
-  server.on("/updateCallsign", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      if (request->hasParam("callsign")) {
-          String callsign = request->getParam("callsign")->value();
-          preferences.putString("callsign", callsign);
-          Serial.printf("📡 Callsign set to %s\n", callsign.c_str());
-      }
-      request->send(200, "text/plain", "Callsign updated"); });
-
-  server.on("/updateLocator", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      if (request->hasParam("locator")) {
-          String locator = request->getParam("locator")->value();
-          preferences.putString("locator", locator);
-          Serial.printf("📍 Locator set to %s\n", locator.c_str());
-      }
-      request->send(200, "text/plain", "Locator updated"); });
-
   server.on("/getLocator", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      Serial.println("📤 Sending Locator...");
-      String locator = preferences.getString("locator", "");
-      StaticJsonDocument<64> doc;
-      doc["locator"] = locator;
-      String json;
-      serializeJson(doc, json);
-      request->send(200, "application/json", json); });
+    preferences.begin("settings", true);
+    String locator = preferences.getString("locator", "");
+    preferences.end();
 
-  // Power Management
-  server.on("/updatePower", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-      if (request->hasParam("power")) {
-          String power = request->getParam("power")->value();
-          preferences.putUInt("power", power.toInt());
-          Serial.printf("⚡ Power set to %s mW\n", power.c_str());
-      }
-      request->send(200, "text/plain", "Power updated"); });
+    Serial.println("📤 Sending Locator...");
+    StaticJsonDocument<64> doc;
+    doc["locator"] = locator;
+    String json;
+    serializeJson(doc, json);
+    request->send(200, "application/json", json); });
 
   server.on("/getPower", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      Serial.println("📤 Sending Power Info...");
-      uint32_t power = preferences.getUInt("power", 24);
-      StaticJsonDocument<64> doc;
-      doc["power"] = power;
-      String json;
-      serializeJson(doc, json);
-      request->send(200, "application/json", json); });
+    preferences.begin("settings", true);
+    uint32_t power = preferences.getUInt("power", 24);
+    preferences.end();
 
-  // Control Endpoints
-  server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request)
+    Serial.println("📤 Sending Power Info...");
+    StaticJsonDocument<64> doc;
+    doc["power"] = power;
+    String json;
+    serializeJson(doc, json);
+    request->send(200, "application/json", json); });
+
+  server.on("/getTimes", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      Serial.println("🔄 Reboot requested...");
-      request->send(200, "text/plain", "Rebooting...");
-      delay(1000);
-      ESP.restart(); });
+    Serial.printf("📤 Sending WSPR Timing Info to web page (TX = %d s, Next = %d s)\n", tx_ON_running_time_in_s, currentRemainingSeconds);
+    StaticJsonDocument<128> doc;
+    doc["currentRemainingSeconds"] = currentRemainingSeconds;
+    doc["txRunningTime"] = tx_ON_running_time_in_s;
+    doc["TX_referenceFrequ"] = TX_referenceFrequ ;
+    doc["intervalBetweenTx"] = intervalBetweenTx;
+    String json;
+    serializeJson(doc, json);
+    request->send(200, "application/json", json); });
 
-  server.on("/factoryReset", HTTP_GET, [](AsyncWebServerRequest *request)
+  // 🔄 Settings update routes
+  server.on("/updateCallsign", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      Serial.println("⚠️ Factory Reset Requested...");
-      request->send(200, "text/plain", "Factory reset...");
-      delay(1000);
-      preferences.clear();
-      ESP.restart(); });
+    if (request->hasParam("callsign")) {
+      String callsign = request->getParam("callsign")->value();
+      preferences.begin("settings", false);
+      preferences.putString("callsign", callsign);
+      preferences.end();
+      Serial.printf("📡 Callsign set to %s\n", callsign.c_str());
+    }
+    request->send(200, "text/plain", "Callsign updated"); });
 
+  server.on("/updateLocator", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    if (request->hasParam("locator")) {
+      String locator = request->getParam("locator")->value();
+      preferences.begin("settings", false);
+      preferences.putString("locator", locator);
+      preferences.end();
+      Serial.printf("📍 Locator set to %s\n", locator.c_str());
+    }
+    request->send(200, "text/plain", "Locator updated"); });
+
+  server.on("/updatePower", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    if (request->hasParam("power")) {
+      String power = request->getParam("power")->value();
+      preferences.begin("settings", false);
+      preferences.putUInt("power", power.toInt());
+      preferences.end();
+      Serial.printf("⚡ Power set to %s mW\n", power.c_str());
+    }
+    request->send(200, "text/plain", "Power updated"); });
+
+  server.on("/updateScheduleState", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    if (request->hasParam("id")) {
+      String scheduleState = request->getParam("id")->value();
+      preferences.begin("settings", false);
+      preferences.putString("scheduleState", scheduleState);
+      preferences.end();
+
+      if (scheduleState == "schedule1") intervalBetweenTx = 2 * 60;
+      else if (scheduleState == "schedule2") intervalBetweenTx = 4 * 60;
+      else if (scheduleState == "schedule3") intervalBetweenTx = 6 * 60;
+      else if (scheduleState == "schedule4") intervalBetweenTx = 8 * 60;
+      else if (scheduleState == "schedule5") intervalBetweenTx = 10 * 60;
+      else intervalBetweenTx = 2 * 60;
+
+      Serial.printf("📅 New schedule selected: %s ➡️ Interval set to %d minutes\n", scheduleState.c_str(), intervalBetweenTx / 60);
+      isFirstIteration = true;
+      interruptWSPRcurrentTX = true;
+    } else {
+      Serial.println("⚠️ No schedule ID received!");
+    }
+    request->send(200, "text/plain", "OK"); });
+
+  // 🛠️ Control and calibration
   server.on("/setFrequency", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-Serial.println("🛠️ Changing mode of operation to: Calibration");
-
-      interruptWSPRcurrentTX=true;
-      modeOfOperation=5;
-      if (request->hasParam("frequency")) {
-          String frequencyStr = request->getParam("frequency")->value();
-          calFrequencyInMhz = strtoull(frequencyStr.c_str(), NULL, 10);
-       setFrequencyInMhz(calFrequencyInMhz);
-
-Serial.printf("📡 Frequency set to %s Hz and clock powered ON.\n", formatFrequencyWithDots(calFrequencyInMhz *1e6).c_str());
-
-      }
-      request->send(200, "text/plain", "Frequency and clock power set"); });
+    Serial.println("🛠️ Changing mode of operation to: Calibration");
+    interruptWSPRcurrentTX = true;
+    modeOfOperation = 5;
+    if (request->hasParam("frequency")) {
+      String frequencyStr = request->getParam("frequency")->value();
+      calFrequencyInMhz = strtoull(frequencyStr.c_str(), NULL, 10);
+      setFrequencyInMhz(calFrequencyInMhz);
+      Serial.printf("📡 Frequency set to %s Hz and clock powered ON.\n", formatFrequencyWithDots(calFrequencyInMhz * 1e6).c_str());
+    }
+    request->send(200, "text/plain", "Frequency and clock power set"); });
 
   server.on("/updateCalFactor", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      if (request->hasParam("calFactor")) {
-          cal_factor = request->getParam("calFactor")->value().toInt();
-          si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
-          Serial.printf("📏 Calibration factor set to %d\n", cal_factor);
-      }
-      request->send(200, "text/plain", "Calibration factor updated"); });
+    if (request->hasParam("calFactor")) {
+      cal_factor = request->getParam("calFactor")->value().toInt();
+      si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+      Serial.printf("📏 Calibration factor set to %d\n", cal_factor);
+    }
+    request->send(200, "text/plain", "Calibration factor updated"); });
 
   server.on("/saveCalFactor", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-              modeOfOperation=2;
-        isFirstIteration = true;
-      if (request->hasParam("calFactor")) {
-          cal_factor = request->getParam("calFactor")->value().toInt();
-          preferences.putInt("cal_factor", cal_factor);
-          Serial.printf("\n📏 Calibration factor saved: %d\n", cal_factor);
-          si5351.set_clock_pwr(SI5351_CLK0, 0);// TX OFF
-          Serial.println("✅ Exiting Calibration Mode, WSPR TX Resumed.");
-      }
-      request->send(200, "text/plain", "Calibration factor saved"); });
+    modeOfOperation = 2;
+    isFirstIteration = true;
+    if (request->hasParam("calFactor")) {
+      cal_factor = request->getParam("calFactor")->value().toInt();
+      preferences.begin("settings", false);
+      preferences.putInt("cal_factor", cal_factor);
+      preferences.end();
+      Serial.printf("\n📏 Calibration factor saved: %d\n", cal_factor);
+      si5351.set_clock_pwr(SI5351_CLK0, 0);  // TX OFF
+      Serial.println("✅ Exiting Calibration Mode, WSPR TX Resumed.");
+    }
+    request->send(200, "text/plain", "Calibration factor saved"); });
 
   server.on("/getCalFactor", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-      
-//cal_factor = preferences.getInt("cal_factor", 0);
-Serial.printf("📤 Sending Calibration Factor: %d\n", cal_factor);
-String cal_factor_str = String(cal_factor);
+    Serial.printf("📤 Sending Calibration Factor: %d\n", cal_factor);
+    request->send(200, "text/plain", String(cal_factor)); });
 
-      request->send(200, "text/plain", cal_factor_str); });
   server.on("/sweepdata", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-  DynamicJsonDocument doc(8192);
+    DynamicJsonDocument doc(8192);
+    JsonArray coarse = doc.createNestedArray("coarse");
+    for (int i = 0; i < coarseSweepCount; i++) {
+      JsonArray point = coarse.createNestedArray();
+      point.add(coarse_sweep_frequ[i]);
+      point.add(coarse_sweep_adc[i]);
+    }
+    doc["coarseMaxFreq"] = coarsePeakFreq;
+    doc["coarseMaxADC"] = coarsePeakAdc;
 
-  // Coarse sweep data
-  JsonArray coarse = doc.createNestedArray("coarse");
-  for (int i = 0; i < coarseSweepCount; i++) {
-    JsonArray point = coarse.createNestedArray();
-    point.add(coarse_sweep_frequ[i]);
-    point.add(coarse_sweep_adc[i]);
-  }
-  doc["coarseMaxFreq"] = coarsePeakFreq;
-  doc["coarseMaxADC"]  = coarsePeakAdc;
+    JsonArray fine = doc.createNestedArray("fine");
+    for (int i = 0; i < fineSweepCount; i++) {
+      JsonArray point = fine.createNestedArray();
+      point.add(fine_sweep_frequ[i]);
+      point.add(fine_sweep_adc[i]);
+    }
+    doc["fineMaxFreq"] = finePeakFreq;
+    doc["fineMaxADC"] = finePeakAdc;
 
-  // Fine sweep data
-  JsonArray fine = doc.createNestedArray("fine");
-  for (int i = 0; i < fineSweepCount; i++) {
-    JsonArray point = fine.createNestedArray();
-    point.add(fine_sweep_frequ[i]);
-    point.add(fine_sweep_adc[i]);
-  }
-  doc["fineMaxFreq"] = finePeakFreq;
-  doc["fineMaxADC"]  = finePeakAdc;
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response); });
 
-  // Send response
-  String response;
-  serializeJson(doc, response);
-  request->send(200, "application/json", response); });
+  // Reboot and reset
+  server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("🔄 Reboot requested...");
+    request->send(200, "text/plain", "Rebooting...");
+    delay(1000);
+    ESP.restart(); });
+
+  server.on("/factoryReset", HTTP_GET, [](AsyncWebServerRequest *request)
+            {
+    Serial.println("⚠️ Factory Reset Requested...");
+    request->send(200, "text/plain", "Factory reset...");
+    delay(1000);
+    preferences.begin("settings", false);
+    preferences.clear();
+    preferences.end();
+    ESP.restart(); });
 
   server.begin();
   Serial.println("✅ Web Server Routes Configuration Completed!");
 }
+
 void initializeTimeClient()
 {
   Serial.println("⏰ Initializing NTP Time Client...");
@@ -1766,12 +1632,14 @@ void si5351_WarmingUp()
 
   // 🎛️ Apply small random frequency offset (-100 to +100 Hz)
 
-  WSPR_TX_operatingFrequ = setRandomWSPRfrequency(selectedBandIndex); /// XXXXXX
+  WSPR_TX_operatingFrequ = setRandomWSPRfrequency(selectedBandIndex) * 100ULL; /// Hz * 100 for module
 
   // 📡 Log the new TX frequency with formatting
   Serial.print("📶 Setting TX Frequency to: ");
-  printWithThousandsSeparator(WSPR_TX_operatingFrequ);
-
+  Serial.print(formatFrequencyWithDots(WSPR_TX_operatingFrequ / 100ULL));
+  Serial.print("     (ref. ");
+  Serial.print(formatFrequencyWithDots(TX_referenceFrequ));
+  Serial.println(")");
   // ⚙️ Configure Si5351 for transmission
   si5351.set_freq(WSPR_TX_operatingFrequ, SI5351_CLK0);
   si5351.set_clock_pwr(SI5351_CLK0, 1); // Power ON CLK0
@@ -1880,6 +1748,7 @@ void TX_ON_counter_core0(void *parameter)
   vTaskDelete(NULL);
 }
 
+/*
 std::string getBandFromFrequency(uint32_t frequency)
 {
 
@@ -1899,6 +1768,8 @@ std::string getBandFromFrequency(uint32_t frequency)
 
   return "???"; // Frequency does not match any defined bands
 }
+*/
+
 void startAPMode()
 {
   Serial.println("\n📡 Starting Access Point mode: 'MLA-TOOLBOX-CONFIG'");
@@ -1964,8 +1835,7 @@ void startAPMode()
               request->send(200, "application/json", scannedNetworksJson); });
 
   // Handle saving settings via POST (SSID, Password, Callsign, Locator)
-  server.on("/saveSettings", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
-            [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
+  server.on("/saveSettings", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL, [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total)
             {
               StaticJsonDocument<512> doc;
               DeserializationError error = deserializeJson(doc, data);
@@ -1996,14 +1866,12 @@ void startAPMode()
               request->send(200, "text/plain", "Settings saved. Rebooting...");
 
               delay(500); // Let browser receive response
-              esp_restart();
-            });
+              esp_restart(); });
 
   // Start the web server
   server.begin();
   Serial.println("✅ AP Web server started and ready to serve at http://192.168.4.1 ⚙️");
 }
-
 
 // ########################## RELATED TO TUNER ####################################
 
@@ -2214,18 +2082,7 @@ void displayFrequAtBottom(unsigned long freq, int x, int y)
     tft.drawString(s + " Hz", 315, y);
   }
 }
-void displayMessageAtBottom(String message, int y)
-{
-  int rectHeight = 16; // Adjust based on font size
-  int rectWidth = 320; // Full screen width
 
-  // Clear the previous message area
-  tft.fillRect(0, y, rectWidth, rectHeight, TFT_BLACK); // Use your background color
-
-  // Set text color and font as needed
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);   // Text color and background color (optional)
-  tft.drawCentreString(message, 160, y, 2); // 160 is center X for a 320 px wide display
-}
 int readAveragedAdc(int pin, int samples)
 {
   uint32_t sum = 0;
@@ -2258,6 +2115,151 @@ void setFrequencyInMhz(float freqMHz)
   // Power on CLK0
   si5351.set_clock_pwr(SI5351_CLK0, 1);
   Serial.println("✅ SI5351 CLK0 powered ON");
+}
+
+unsigned long findResonanceFrequencyFIRST()
+{
+  bool verbose = true;
+
+  const unsigned long coarseStartHz = 9000000UL;
+  const unsigned long coarseEndHz = 20000000UL;
+  const unsigned long coarseStepHz = 50000UL;
+
+  const unsigned long fineSpanHz = 400000UL;
+  const unsigned long fineStepHz = 1000UL;
+  int fineAdcSamples = 1;
+
+  int frequChangeDelay = 1;
+  int sweepCounter = 0;
+  int minAdcValue = 4096;
+
+  unsigned long tempFreq[MAX_SWEEP_POINTS];
+  int tempAdc[MAX_SWEEP_POINTS];
+  int tempCount = 0;
+
+  si5351.set_clock_pwr(SI5351_CLK0, 1);
+
+  // === COARSE SWEEP ===
+  if (verbose)
+    Serial.println("---COARSE_START---");
+
+  for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
+  {
+    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    delay(frequChangeDelay);
+    int adcValue = readAveragedAdc(ADC_PIN, 1);
+    // Serial.printf("COARSE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
+
+    if (tempCount < MAX_SWEEP_POINTS)
+    {
+      tempFreq[tempCount] = freqHz;
+      tempAdc[tempCount] = adcValue;
+      tempCount++;
+
+      if (adcValue < minAdcValue)
+      {
+        minAdcValue = adcValue;
+      }
+    }
+  }
+
+  coarseSweepCount = tempCount;
+  coarsePeakAdc = 0;
+  coarsePeakFreq = 0;
+
+  for (int i = 0; i < tempCount; i++)
+  {
+    coarse_sweep_frequ[i] = tempFreq[i];
+    coarse_sweep_adc[i] = tempAdc[i];
+
+    if (tempAdc[i] > coarsePeakAdc)
+    {
+      coarsePeakAdc = tempAdc[i];
+      coarsePeakFreq = tempFreq[i];
+    }
+  }
+
+  if (verbose)
+  {
+    Serial.printf("🟨 COARSE_MAX_ADC: %d at %lu Hz\n", coarsePeakAdc, coarsePeakFreq);
+    Serial.println("---COARSE_END---");
+  }
+
+  // === FINE SWEEP ===
+  if (verbose)
+    Serial.println("---FINE_START---");
+  fineAdcSamples = 3;
+  tempCount = 0;
+  for (int i = 0; i < MAX_SWEEP_POINTS; i++)
+  {
+    tempFreq[i] = 0;
+    tempAdc[i] = 0;
+  }
+
+  unsigned long fineStartHz = coarsePeakFreq - fineSpanHz / 2;
+  unsigned long fineStopHz = coarsePeakFreq + fineSpanHz / 2;
+
+  // Serial.printf("🟨 FINE SWEEP from %lu to %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, fineStepHz);
+
+  for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += fineStepHz)
+  {
+    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    delay(frequChangeDelay);
+    int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
+    // Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
+
+    if (tempCount < MAX_SWEEP_POINTS)
+    {
+      tempFreq[tempCount] = freqHz;
+      tempAdc[tempCount] = adcValue;
+      tempCount++;
+
+      if (adcValue < minAdcValue)
+      {
+        minAdcValue = adcValue;
+      }
+    }
+  }
+
+  fineSweepCount = tempCount;
+  finePeakAdc = 0;
+  finePeakFreq = 0;
+
+  for (int i = 0; i < tempCount; i++)
+  {
+    fine_sweep_frequ[i] = tempFreq[i];
+    fine_sweep_adc[i] = tempAdc[i];
+
+    if (tempAdc[i] > finePeakAdc)
+    {
+      finePeakAdc = tempAdc[i];
+      finePeakFreq = tempFreq[i];
+    }
+  }
+
+  if (verbose)
+  {
+    Serial.printf("🟨 FINE_MAX_ADC: %d at %lu Hz\n", finePeakAdc, finePeakFreq);
+    Serial.println("---FINE_END---");
+  }
+
+  // Summary
+  if (verbose)
+  {
+    Serial.println("---SUMMARY---");
+    Serial.printf("🟨 NOISE_FLOOR: %d\n", minAdcValue);
+    Serial.printf("🟨 DELTA: %d\n", finePeakAdc - minAdcValue);
+    Serial.printf("🟨 FINAL RESONANCE FREQUENCY: %lu Hz\n", finePeakFreq);
+    Serial.println("SWEEP_DONE");
+  }
+
+  resonanceFrequ = finePeakFreq;
+  bestAdcAtSweep = finePeakAdc;
+  noiseFloor = minAdcValue;
+
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  delay(2000);
+  return resonanceFrequ;
 }
 
 unsigned long findResonanceFrequency()
@@ -2399,6 +2401,7 @@ unsigned long findResonanceFrequency()
   resonanceFrequ = finePeakFreq;
   bestAdcAtSweep = finePeakAdc;
   noiseFloor = minAdcValue;
+  range = finePeakAdc - minAdcValue;
 
   si5351.set_clock_pwr(SI5351_CLK0, 0);
   delay(2000);

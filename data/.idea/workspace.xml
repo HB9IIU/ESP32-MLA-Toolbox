@@ -10,13 +10,7 @@
   <component name="ChangeListManager">
     <list default="true" id="b3707aef-4e55-4441-ae0c-44ef0adad628" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/ap.html" beforeDir="false" afterPath="$PROJECT_DIR$/ap.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/clock.html" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/index.html" beforeDir="false" afterPath="$PROJECT_DIR$/index.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/indexORI.html" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/pinegrow.json" beforeDir="false" afterPath="$PROJECT_DIR$/pinegrow.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/splash.png" beforeDir="false" afterPath="$PROJECT_DIR$/splash.png" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../platformio.ini" beforeDir="false" afterPath="$PROJECT_DIR$/../platformio.ini" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/../src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -104,22 +98,11 @@
       <workItem from="1747556778037" duration="1876000" />
       <workItem from="1747567833508" duration="38483000" />
       <workItem from="1747816956084" duration="303000" />
-      <workItem from="1748417512213" duration="6958000" />
+      <workItem from="1748417512213" duration="17489000" />
     </task>
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
     <option name="version" value="3" />
-  </component>
-  <component name="XDebuggerManager">
-    <breakpoint-manager>
-      <breakpoints>
-        <line-breakpoint enabled="true" type="javascript">
-          <url>file://$PROJECT_DIR$/index.html</url>
-          <line>498</line>
-          <option name="timeStamp" value="18" />
-        </line-breakpoint>
-      </breakpoints>
-    </breakpoint-manager>
   </component>
 </project>
