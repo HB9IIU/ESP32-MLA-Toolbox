@@ -8,23 +8,7 @@
     <option name="autoReloadType" value="SELECTIVE" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="b3707aef-4e55-4441-ae0c-44ef0adad628" name="Changes" comment="">
-      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/assets/_pginfo/fonts.json" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/assets/favicon.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/assets/js/popper.min.js" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/assets/pinegrow.json" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/assets/spectrum.jpg" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/assets/warning.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/assets/wsprlogo.png" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/calibrate.html" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/diagnostic.html" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/index.html" beforeDir="false" afterPath="$PROJECT_DIR$/index.html" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/newclock.html" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/pinegrow.json" beforeDir="false" afterPath="$PROJECT_DIR$/pinegrow.json" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../platformio.ini" beforeDir="false" afterPath="$PROJECT_DIR$/../platformio.ini" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/../src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/../src/main.cpp" afterDir="false" />
-    </list>
+    <list default="true" id="b3707aef-4e55-4441-ae0c-44ef0adad628" name="Changes" comment="" />
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -116,7 +100,7 @@
       <workItem from="1747567833508" duration="38483000" />
       <workItem from="1747816956084" duration="303000" />
       <workItem from="1748417512213" duration="18191000" />
-      <workItem from="1748605700374" duration="13374000" />
+      <workItem from="1748605700374" duration="13714000" />
     </task>
     <servers />
   </component>
