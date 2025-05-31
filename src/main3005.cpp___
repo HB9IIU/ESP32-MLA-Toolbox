@@ -1,19 +1,14 @@
 // ################################################################################################
 // Includes
-
-// will be eliminated as AP config
-/*
 #ifdef MYCONFIG_H_EXISTS
 #include <myconfig.h> // Only include myconfig.h if it exists
 #else
 #include <config.h> // Include config.h if configDS.h is not present
 #endif
-*/
-//--------------------------------
 
 #include <Arduino.h>
 #include <WiFi.h>
-#include <TFT_eSPI.h>
+#include <TFT_eSPI.h> 
 #include <NTPClient.h>
 #include <si5351.h>
 #include <JTEncode.h>
@@ -24,7 +19,6 @@
 #include <ArduinoJson.h>
 #include <ESPmDNS.h> // Library to enable mDNS (Multicast DNS) for resolving local hostnames like "device.local"
 #include <Adafruit_MPR121.h>
-// Include the necessary library for Savitzky-Golay (assuming it's already added to your project)
 //------------------------------------
 #include <PNGdec.h> //PNG image decoding library
 
@@ -32,7 +26,7 @@
 
 #define IRQ_PIN 17
 
-#define MAX_SWEEP_POINTS 370
+#define MAX_SWEEP_POINTS 405
 
 unsigned long coarse_sweep_frequ[MAX_SWEEP_POINTS];
 int coarse_sweep_adc[MAX_SWEEP_POINTS];
@@ -108,10 +102,9 @@ void displayFrequAtBottom(unsigned long freq, int x, int y);
 int readAveragedAdc(int pin, int samples);
 void setFrequencyInMhz(float freqMHz);
 unsigned long findResonanceFrequency();
-unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz);
-void initSI5351();
+bool initSI5351();
 byte selectedBandIndex;
-bool drawFirstTime = true;
+bool drawTuningScreenFirstTime = true;
 String formatFrequencyWithDots(unsigned freq);
 
 // related to web server
@@ -121,7 +114,6 @@ const char *hostname = "mlatoolbox";
 void initKeypad();
 void IRAM_ATTR handleTouchIRQ();
 void displayMainMenu();
-void displayAnalyzeMenu();
 int selectedModeOfOperation;
 volatile bool touchInterrupt = false;
 String lastFormattedFKPF = "";
@@ -135,14 +127,7 @@ const char keymapFKPF[12] = {
     '*', '7', '4', '1',
     '0', '8', '5', '2',
     '#', '9', '6', '3'};
-const char *sweepMenuItems[] = {
-    "[1] 40 m (7 MHz)",
-    "[2] 30 m (10 MHz)",
-    "[3] 20 m (14 MHz)",
-    "[4] 17 m (18 MHz)",
-    "[5] 15 m (21 MHz)",
-    "[6] 10 m (28 MHz)",
-    "[7] 40 - 10 m (full)]"};
+
 String freqStrFKPF = "";
 char lastKeyFKPF = 0;
 // TFT layout
@@ -162,7 +147,7 @@ void handleKey(char key);
 void displayMessageAndReboot();
 void displayAboutMessage();
 void checkIfAPmodeIsRequiredForFirstTimeConfig();
-void displayKeypadOrSImoduleError();
+
 // Global Variables for meter
 #define M_SIZE 1.3333   // Meter size scale factor for rotation(1)
 #define TFT_GREY 0x5AEB // Custom grey color for background
@@ -222,7 +207,7 @@ time_t currentRemainingSeconds;
 time_t intervalBetweenTx;
 
 // timeOffset declaration
-int timeOffset = 2; // not used yet
+int timeOffset = 0; // not used yet
 
 // TX status
 bool tx_is_ON = false;
@@ -269,21 +254,13 @@ void setup()
 {
   Serial.begin(115200); // Start serial communication at 115200 baud rate
   delay(100);           // Delay for 100 milliseconds for stable serial communication, or 5000 for debug in Visual Studio
-  printVersionBox("Beta", VERSION);
+
   mountAndListSPIFFS();
 
-  // Retrieve user settings
-  retrieveUserSettings();
+  printVersionBox("Beta", VERSION);
 
   initTFT();
 
-  // init keypad
-  initKeypad();
-
-  // init RF module
-  initSI5351();
-
-  // splash image
   displayPNGfromSPIFFS("splash.png", 0); // will stay on enough time due to next steps
 
   bool debugAP = false;
@@ -346,6 +323,8 @@ void setup()
 
   if (APmode == false)
   {
+    // Retrieve user settings
+    retrieveUserSettings();
 
     // Establish WiFi Connection
     connectToWiFi();
@@ -357,7 +336,13 @@ void setup()
     initializeTimeClient();
 
     // Update NTP time
-    updateNTPTime();
+    // updateNTPTime();
+
+    // init keypad
+    initKeypad();
+
+    // init RF module
+    initSI5351();
 
     displayMainMenu();
   }
@@ -384,7 +369,7 @@ void loop()
   // [2] WSPR Tuning
   // [3] CW Beacon
   // [4] VFO
-  // [5] Analyze
+  // [5] Diagnostic
   // [6] About
   // [0] Restart
 
@@ -393,7 +378,7 @@ void loop()
 
   {
 
-    if (drawFirstTime == true)
+    if (drawTuningScreenFirstTime == true)
     {
       tft.fillScreen(TFT_BLACK);
       drawAnalogMeter();
@@ -410,7 +395,7 @@ void loop()
       tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Clear the previous message area
       tft.setTextColor(TFT_WHITE, TFT_BLACK);
       tft.drawCentreString(formatFrequencyWithDots(resonanceFrequ), 160, 180, 7);
-      drawFirstTime = false;
+      drawTuningScreenFirstTime = false;
       delay(2000);
       tft.fillRect(0, 170, 320, 240 - 170, TFT_BLACK); // Use your background color
       selectedFrequencyViaKeypad = 14097000;
@@ -526,7 +511,7 @@ void loop()
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
     tft.drawCentreString(formatFrequencyWithDots(selectedFrequencyViaKeypad), 160, 81, 7); // Centered horizontally at X=160
     tft.setFreeFont(&FreeSans9pt7b);
-    tft.setTextColor(TFT_YELLOW, TFT_NAVY);
+    tft.setTextColor(TFT_GREY, TFT_NAVY);
     tft.drawCentreString("Press 0 to Stop & Exit", 160, 215, 1);
     si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
     setFrequencyInMhz((float)selectedFrequencyViaKeypad / 1e6);
@@ -571,8 +556,9 @@ void loop()
       tft.setTextColor(TFT_YELLOW, TFT_NAVY);
       tft.setFreeFont(&FreeMonoBold12pt7b);
 
-      tft.drawCentreString("Press # to Exit", 160, 212, 1);
+      tft.drawCentreString("Press 0 to Finalize", 160, 212, 1);
       setFrequencyInMhz((float)selectedFrequencyViaKeypad / 1e6);
+      // setFrequencyInMhz(14.925);
     }
 
     // --------------------------------------------------------------
@@ -617,40 +603,18 @@ void loop()
           if (delta != 0)
           {
             cal_factor += delta;
+            preferences.putInt("cal_factor", cal_factor);
             si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+
             Serial.printf("📡 Calibration factor updated by %+d → New value: %d\n", delta, cal_factor);
           }
 
-          if (key == '#')
+          if (key == '0')
           {
-            Serial.println("🆗 Key # pressed! Saving calibration & Restarting...");
-
-            // Save calibration factor to Preferences
+            Serial.println("🆗 Key 0 pressed! Restarting...");
             preferences.begin("settings", false);
             preferences.putInt("cal_factor", cal_factor);
             preferences.end();
-
-            // Prepare TFT message
-            tft.fillScreen(TFT_BLACK);
-            tft.setTextColor(TFT_GREEN, TFT_BLACK);
-            tft.setTextSize(2);
-            tft.drawCentreString("SUCCESS", tft.width() / 2, tft.height() / 4 - 25, 4);
-
-            tft.setTextSize(1);
-            tft.setTextColor(TFT_GOLD);
-
-            // Convert int to string
-            char calBuffer[32];
-            sprintf(calBuffer, "Factor: %d", cal_factor);
-            tft.drawCentreString(calBuffer, tft.width() / 2, tft.height() / 2 - 20, 4);
-
-            tft.drawCentreString("SAVED", tft.width() / 2, tft.height() / 2 + 20, 4);
-
-            // Pretty print confirmation with emoji and value
-            Serial.print("💾 Calibration factor saved: ");
-            Serial.print(cal_factor);
-            Serial.println(" ✅");
-
             PowerSImoduleOFF();
             displayMessageAndReboot();
           }
@@ -659,19 +623,13 @@ void loop()
     }
   }
 
-  // [5] Anaylze mode
+  // [5] Diagnostic mode
   if (modeOfOperation == 5)
   {
-    if (drawFirstTime)
-    {
+    findResonanceFrequency();
 
-      displayAnalyzeMenu();
-      drawFirstTime = false;
-    }
-    // findResonanceFrequency();
-      modeOfOperation = 19; //Sweep Menu Handling
-
-
+    delay(500); // we do nothing
+    Serial.print(".");
     return;
   }
 
@@ -684,22 +642,15 @@ void loop()
       tft.setTextColor(TFT_YELLOW, TFT_BLACK);
       tft.fillRect(0, 0, 320, 30, TFT_BLACK);
       tft.drawCentreString(titleForFrequencyInputScreen, 160, 4, 4);
-      tft.setTextColor(TFT_GOLD, TFT_NAVY);
-      tft.setFreeFont(&FreeSans12pt7b);
-      tft.drawCentreString("Enter Desired Frequency", 160, 45, 1);
       tft.setTextColor(TFT_WHITE, TFT_NAVY);
+      tft.setFreeFont(&FreeSansBold12pt7b);
+      tft.drawCentreString("Enter Desired Frequency", 160, 45, 1);
       tft.setFreeFont(&FreeSans9pt7b);
-      tft.drawCentreString("Output Power: < 16 mW (12 dBm)", 160, 75, 1);
-      // tft.drawCentreString(messageForFrequencyInputScreen, 160, 75, 1);
-      tft.setTextColor(TFT_YELLOW, TFT_NAVY);
-      tft.setFreeFont(&FreeMonoBold12pt7b);
-
-      tft.drawCentreString("Press # for Enter", 160, 200, 1);
+      tft.drawCentreString(messageForFrequencyInputScreen, 160, 75, 1);
       tft.drawRoundRect(10, 110, 300, 68, 5, TFT_DARKGREY);
       tft.fillRoundRect(9, 109, 302, 70, 6, TFT_BLACK);
       tft.drawRoundRect(9, 109, 302, 70, 6, TFT_LIGHTGREY);
-
-      /// tft.drawCentreString("Output Power: < 16 mW (12 dBm)", 150, 200, 1);
+      tft.drawCentreString("Output Power: < 16 mW (12 dBm)", 150, 200, 1);
 
       alredyDisplayedOnce = true;
     }
@@ -840,9 +791,10 @@ void loop()
 
             if (selectedModeOfOperation == 5)
             {
-              Serial.println("👉 User pressed [5] ➜ Analyze Mode 🌐");
-              modeOfOperation = 5;
-              drawFirstTime = true;
+              Serial.println("👉 User pressed [5] ➜ Diagnostic Mode 🌐");
+              modeOfOperation=5;
+              findResonanceFrequency();
+              return;
             }
 
             if (selectedModeOfOperation == 1)
@@ -865,116 +817,6 @@ void loop()
       }
     }
     // Reset key tracking when no key is touched
-    if (cap.touched() == 0)
-    {
-      lastKeyFKPF = 0;
-    }
-  }
-
-  // Sweep Menu Handling
-  if (touchInterrupt && modeOfOperation == 19)
-  {
-    touchInterrupt = false;
-
-    uint16_t touched = cap.touched();
-    for (uint8_t i = 0; i < 12; i++)
-    {
-      if (touched & (1 << i))
-      {
-        char key = keymapFKPF[i];
-        if (key != lastKeyFKPF)
-        {
-          lastKeyFKPF = key;
-
-          if (key >= '1' && key <= '7')
-          {
-            uint8_t bandIndex = key - '1';
-            Serial.print("📡 User selected band ");
-            Serial.println(sweepMenuItems[bandIndex]);
-
-            unsigned long startHz, endHz;
-
-            if (key == '7')
-            {
-              startHz = 7000000UL;
-              endHz = 30000000UL;
-            }
-            else
-            {
-              // Extract MHz value from string, e.g., "(14 MHz)"
-              unsigned int centerMHz = 0;
-              const char *p = strchr(sweepMenuItems[bandIndex], '(');
-              if (p != nullptr)
-              {
-                sscanf(p, "(%u MHz)", &centerMHz);
-                startHz = (centerMHz - 1) * 1000000UL;
-                endHz = (centerMHz + 1) * 1000000UL;
-              }
-              else
-              {
-                Serial.println("⚠️ Could not parse center frequency!");
-                break;
-              }
-            }
-
-            // Print sweep range in MHz
-            Serial.printf("📈 Sweep range: %.1f MHz ➝ %.1f MHz\n", startHz / 1e6, endHz / 1e6);
-            //intermediate http menud
-            // Margins and plot dimensions
-
-
-  // Clear the plot area
-  tft.fillRect(0, 25, 320, 240, TFT_BLACK);
-  tft.setTextColor(TFT_GOLD, TFT_BLACK);
-  tft.drawCentreString("Visit",180,TFT_HEIGHT/2/2,4);
-    tft.drawCentreString("http://mlatoolbox.local",180,TFT_HEIGHT/2,4);
-    tft.drawCentreString("or wait here....",180,TFT_HEIGHT/4*3,4);
-
-            while (1)
-            {
-         
-       
-              unsigned long result = sweepBand(startHz, endHz);
-
-              Serial.printf("🎯 sweepBand() completed, resonance = %.3f MHz\n", result / 1e6);
-              uint16_t touched = cap.touched();
-
-              for (int i = 0; i < 12; i++)
-              {
-                if (touched & (1 << i))
-                {
-                  char key = keymapFKPF[i];
-                  Serial.printf("🔘 Key pressed: %c (pin %d)\n", key, i);
-
-                  if (key == '0' || key == '#' || key == '*')
-                  {
-                    Serial.println("🔁 Reboot key detected — rebooting...");
-                    ///displayMessageAndReboot();
-                  }
-
-                  break; // handle only the first detected key
-                }
-              }
-
-              delay(100);
-            }
-          }
-          else if (key == '0')
-          {
-            Serial.println("⚡ User pressed [0] ➜ Rebooting device 🔄");
-            displayMessageAndReboot();
-          }
-          else
-          {
-            Serial.print("🚫 Ignored key: ");
-            Serial.println(key);
-            Serial.println("❗ Valid keys: [0] for reboot, [1–7] for band selection.");
-          }
-        }
-     
-      }
-    }
-
     if (cap.touched() == 0)
     {
       lastKeyFKPF = 0;
@@ -1158,7 +1000,6 @@ void printVersionBox(const String &text, String version)
   }
   Serial.println();
 }
-
 void initTFT()
 {
   tft.begin();
@@ -1171,7 +1012,7 @@ void initTFT()
 void closeSplashEffect(TFT_eSPI &tft, uint32_t hexColor, uint16_t delayMs)
 {
   // Inline hex to RGB565 conversion
-  uint8_t r = (hexColor >> 16) & 0xFF;ing
+  uint8_t r = (hexColor >> 16) & 0xFF;
   uint8_t g = (hexColor >> 8) & 0xFF;
   uint8_t b = hexColor & 0xFF;
   uint16_t color = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
@@ -1248,11 +1089,7 @@ void mountAndListSPIFFS(uint8_t levels, bool listContent)
 
 void retrieveUserSettings()
 {
-  Serial.println("📂 Loading user settings from NVS...");
-
-  // ✅ Open preferences namespace
-  preferences.begin("settings", false);
-
+  Serial.println();
   // 📡 Retrieve Callsign
   String storedCall = preferences.getString("callsign");
   if (storedCall.isEmpty())
@@ -1288,7 +1125,7 @@ void retrieveUserSettings()
   if (power_mW == 0)
   {
     Serial.println("⚠️ Power value not found! Setting default to 250 mW 🆕");
-    power_mW = 250;
+    power_mW = 1;
     preferences.putUInt("power", power_mW);
   }
   else
@@ -1339,11 +1176,7 @@ void retrieveUserSettings()
   {
     Serial.println("✅ Calibration factor retrieved successfully.");
   }
-  Serial.printf("📏 Calibration Factor: %d\n", cal_factor);
-
-  // ✅ Close preferences
-  preferences.end();
-
+  Serial.printf("📢 Calibration Factor: %d\n", cal_factor);
   Serial.println();
 
   // 📡 Build dynamic CW beacon message
@@ -1469,20 +1302,15 @@ void configure_web_server_routes()
     Serial.println("📄 Route: /index.html -> /index.html");
     request->send(SPIFFS, "/index.html", "text/html"); });
 
-  server.on("/analyze.html", HTTP_GET, [](AsyncWebServerRequest *request)
+  server.on("/diagnostic.html", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-    Serial.println("📄 Route: /analyze.html -> /analyze.html");
-    request->send(SPIFFS, "/analyze.html", "text/html"); });
+    Serial.println("📄 Route: /diagnostic.html -> /diagnostic.html");
+    request->send(SPIFFS, "/diagnostic.html", "text/html"); });
 
   server.on("/calibrate.html", HTTP_GET, [](AsyncWebServerRequest *request)
             {
     Serial.println("🔧 Route: /calibrate.html -> Calibration Mode");
     request->send(SPIFFS, "/calibrate.html", "text/html"); });
-
-  server.on("/wspr.html", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-    Serial.println("🔧 Route: /wspr.html -> WSPR Mode");
-    request->send(SPIFFS, "/wspr.html", "text/html"); });
 
   server.on("/favicon.ico", HTTP_GET, [](AsyncWebServerRequest *request)
             {
@@ -1495,15 +1323,11 @@ void configure_web_server_routes()
     Serial.println("🖼️ Route: /assets/spectrum.jpg");
     request->send(SPIFFS, "/assets/spectrum.jpg", "image/jpeg"); });
 
-  server.on("/splash.png", HTTP_GET, [](AsyncWebServerRequest *request)
-            {
-    Serial.println("🖼️ Route: /splash.png");
-    request->send(SPIFFS, "/splash.png", "image/png"); });
-
   server.on("/assets/wsprlogo.png", HTTP_GET, [](AsyncWebServerRequest *request)
             {
     Serial.println("🖼️ Route: /assets/wsprlogo.png");
     request->send(SPIFFS, "/assets/wsprlogo.png", "image/png"); });
+
   server.on("/assets/warning.png", HTTP_GET, [](AsyncWebServerRequest *request)
             {
     Serial.println("🖼️ Route: /assets/warning.png");
@@ -1628,7 +1452,7 @@ void configure_web_server_routes()
   // 🛠️ Control and calibration
   server.on("/setFrequency", HTTP_GET, [](AsyncWebServerRequest *request)
             {
-    Serial.println("🛠️ Changing mode of operation to: Analyze (sweeper)");
+    Serial.println("🛠️ Changing mode of operation to: Calibration");
     interruptWSPRcurrentTX = true;
     modeOfOperation = 5;
     if (request->hasParam("frequency")) {
@@ -1729,65 +1553,53 @@ void initializeTimeClient()
 }
 void updateNTPTime()
 {
-  const int maxAttempts = 10;
-  const unsigned long timeoutMs = 5000;
-  const char *fallbackServers[] = {
-      "pool.ntp.org",
-      "time.nist.gov",
-      "europe.pool.ntp.org"};
-  const int numFallbacks = sizeof(fallbackServers) / sizeof(fallbackServers[0]);
+  Serial.println("\n⏰ Attempting to update NTP time...");
+  unsigned long startTime = millis();
+  int attempts = 0;
 
-  Serial.println("⏰ Attempting to update NTP time...");
-  tft.setFreeFont(&FreeSans9pt7b);
-
-  for (int serverIndex = 0; serverIndex < numFallbacks; serverIndex++)
+  // Try to update NTP time up to 10 times or until timeout
+  while (attempts < 10)
   {
-    timeClient.setPoolServerName(fallbackServers[serverIndex]);
-    initializeTimeClient(); // Re-initialize with new server
-    Serial.print("🌐 Trying NTP server: ");
-    Serial.println(fallbackServers[serverIndex]);
 
-    unsigned long startTime = millis();
-    int attempts = 0;
+    ;
 
-    while (attempts < maxAttempts)
+    if (timeClient.update())
     {
-      if (timeClient.update())
+      Serial.print("✅ NTP time updated successfully: ");
+      Serial.println(timeClient.getFormattedTime());
+      return; // Success, exit function
+    }
+    else
+    {
+      if (millis() - startTime > 5000)
       {
-        Serial.print("✅ NTP time updated successfully: ");
-        Serial.println(timeClient.getFormattedTime());
-        return; // Success!
-      }
-      tft.setTextColor(TFT_BLACK); // to erase previous message
-      tft.drawCentreString("WiFi Connected Successfully!", 160, 158, 1);
-      if (millis() - startTime > timeoutMs)
-      {
-        Serial.println("⏳ Timeout exceeded. Moving to next server...");
-        break;
+        Serial.println("⏳ Timeout exceeded after 5 seconds.");
+        break; // Exit the loop if timeout exceeded
       }
 
-      // Show retry message on screen
+      Serial.print("⚠️ Failed to update NTP time. Retrying (Attempt ");
+      Serial.print(attempts + 1);
+      Serial.println("/10)...");
 
-      String msg = "NTP retry (" + String(attempts + 1) + "/" + String(maxAttempts) + ")";
+      tft.setFreeFont(&FreeSans9pt7b);
+      String msg = "Failed to update NTP time. Retrying (" + String(attempts) + ")";
       tft.setTextColor(TFT_RED);
       tft.drawCentreString(msg, 160, 158, 1);
-
-      delay(2000); // Wait before retrying
-      attempts++;
-
-      // Clear message
+      initializeTimeClient(); // Re-initialize time client
+      delay(2000);            // Wait before retrying
       tft.setTextColor(TFT_BLACK);
       tft.drawCentreString(msg, 160, 158, 1);
+      attempts++;
     }
   }
 
-  // All servers failed
-  Serial.println("❌ NTP time could not be updated after trying all servers.");
+  // If we reach here, NTP time could not be updated
+  Serial.println("❌ NTP time could not be updated after multiple attempts.");
   Serial.println("🔄 Rebooting system...");
-  delay(2000); // Allow time for messages to be read
+
+  // Restart the ESP32
   esp_restart();
 }
-
 void initializeNextTransmissionTime()
 {
   // 🕒 Get Current Epoch Time
@@ -2288,7 +2100,7 @@ int readAveragedAdc(int pin, int samples)
   for (int i = 0; i < samples; i++)
   {
     sum += analogRead(pin);
-    delayMicroseconds(25);
+    delayMicroseconds(50);
   }
   return sum / samples;
 }
@@ -2460,14 +2272,14 @@ unsigned long findResonanceFrequencyFIRST()
   delay(2000);
   return resonanceFrequ;
 }
+
 unsigned long findResonanceFrequency()
 {
   bool verbose = true;
 
-  // === Sweep Configuration ===
-  const unsigned long coarseStartHz = 6500000UL;
-  const unsigned long coarseEndHz = 30000000UL;
-  const unsigned long coarseStepHz = 100000UL;
+  const unsigned long coarseStartHz = 9000000UL;
+  const unsigned long coarseEndHz = 20000000UL;
+  const unsigned long coarseStepHz = 50000UL;
 
   const unsigned long fineSpanHz = 400000UL;
   const unsigned long fineStepHz = 1000UL;
@@ -2477,27 +2289,22 @@ unsigned long findResonanceFrequency()
   int sweepCounter = 0;
   int minAdcValue = 4096;
 
-  // Temporary buffers
   unsigned long tempFreq[MAX_SWEEP_POINTS];
   int tempAdc[MAX_SWEEP_POINTS];
   int tempCount = 0;
 
-  si5351.set_clock_pwr(SI5351_CLK0, 1); // Power on SI5351 clock 0
+  si5351.set_clock_pwr(SI5351_CLK0, 1);
 
   // === COARSE SWEEP ===
   if (verbose)
-    Serial.println("🔶 --- COARSE SWEEP START ---");
+    Serial.println("---COARSE_START---");
 
   for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
   {
     si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, 1);
-
-    if (verbose)
-      Serial.printf("🟨 COARSE;%d;%lu;%d\n", sweepCounter, freqHz, adcValue);
-
-    sweepCounter++;
+    // Serial.printf("COARSE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
 
     if (tempCount < MAX_SWEEP_POINTS)
     {
@@ -2506,7 +2313,9 @@ unsigned long findResonanceFrequency()
       tempCount++;
 
       if (adcValue < minAdcValue)
+      {
         minAdcValue = adcValue;
+      }
     }
   }
 
@@ -2528,17 +2337,15 @@ unsigned long findResonanceFrequency()
 
   if (verbose)
   {
-    Serial.printf("🟡 COARSE_MAX_ADC: %d at %lu Hz\n", coarsePeakAdc, coarsePeakFreq);
-    Serial.println("🔶 --- COARSE SWEEP END ---");
+    Serial.printf("🟨 COARSE_MAX_ADC: %d at %lu Hz\n", coarsePeakAdc, coarsePeakFreq);
+    Serial.println("---COARSE_END---");
   }
 
   // === FINE SWEEP ===
   if (verbose)
-    Serial.println("🔷 --- FINE SWEEP START ---");
-
+    Serial.println("---FINE_START---");
   fineAdcSamples = 3;
   tempCount = 0;
-
   for (int i = 0; i < MAX_SWEEP_POINTS; i++)
   {
     tempFreq[i] = 0;
@@ -2548,19 +2355,14 @@ unsigned long findResonanceFrequency()
   unsigned long fineStartHz = coarsePeakFreq - fineSpanHz / 2;
   unsigned long fineStopHz = coarsePeakFreq + fineSpanHz / 2;
 
-  if (verbose)
-    Serial.printf("🔹 FINE SWEEP RANGE: %lu Hz ➝ %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, fineStepHz);
+  // Serial.printf("🟨 FINE SWEEP from %lu to %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, fineStepHz);
 
   for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += fineStepHz)
   {
     si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
-
-    if (verbose)
-      Serial.printf("🔹 FINE;%d;%lu;%d\n", sweepCounter, freqHz, adcValue);
-
-    sweepCounter++;
+    // Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
 
     if (tempCount < MAX_SWEEP_POINTS)
     {
@@ -2569,7 +2371,9 @@ unsigned long findResonanceFrequency()
       tempCount++;
 
       if (adcValue < minAdcValue)
+      {
         minAdcValue = adcValue;
+      }
     }
   }
 
@@ -2591,18 +2395,18 @@ unsigned long findResonanceFrequency()
 
   if (verbose)
   {
-    Serial.printf("🔵 FINE_MAX_ADC: %d at %lu Hz\n", finePeakAdc, finePeakFreq);
-    Serial.println("🔷 --- FINE SWEEP END ---");
+    Serial.printf("🟨 FINE_MAX_ADC: %d at %lu Hz\n", finePeakAdc, finePeakFreq);
+    Serial.println("---FINE_END---");
   }
 
-  // === SUMMARY ===
+  // Summary
   if (verbose)
   {
-    Serial.println("📊 --- SWEEP SUMMARY ---");
-    Serial.printf("📉 NOISE FLOOR: %d\n", minAdcValue);
-    Serial.printf("📈 ADC RANGE (Delta): %d\n", finePeakAdc - minAdcValue);
-    Serial.printf("🎯 FINAL RESONANCE FREQUENCY: %lu Hz\n", finePeakFreq);
-    Serial.println("✅ SWEEP COMPLETE");
+    Serial.println("---SUMMARY---");
+    Serial.printf("🟨 NOISE_FLOOR: %d\n", minAdcValue);
+    Serial.printf("🟨 DELTA: %d\n", finePeakAdc - minAdcValue);
+    Serial.printf("🟨 FINAL RESONANCE FREQUENCY: %lu Hz\n", finePeakFreq);
+    Serial.println("SWEEP_DONE");
   }
 
   resonanceFrequ = finePeakFreq;
@@ -2610,210 +2414,8 @@ unsigned long findResonanceFrequency()
   noiseFloor = minAdcValue;
   range = finePeakAdc - minAdcValue;
 
-  si5351.set_clock_pwr(SI5351_CLK0, 0); // Turn off SI5351
-  delay(2000);                          // Small delay before returning
-
-  return resonanceFrequ;
-}
-
-void plotFineSweep(unsigned long fine_sweep_frequ[], int fine_sweep_adc[], int fineSweepCount,
-                   unsigned long fineFreqStart, unsigned long fineFreqEnd,
-                   int minAdcValue, int finePeakAdc, unsigned long resonanceFreq)
-{
-
-  // Margins and plot dimensions
-  const int topMargin = 35;
-  const int bottomMargin = 20;
-  const int plotWidth = 320;
-  const int plotHeight = 240 - topMargin - bottomMargin;
-
-  // Clear the plot area
-  tft.fillRect(0, topMargin - 10, plotWidth, plotHeight + 10, TFT_BLACK);
-
-  // Scaling factors for frequency (X-axis) and ADC (Y-axis)
-  const float freqScale = float(plotWidth - 30) / (fineFreqEnd - fineFreqStart);
-  const float adcScale = float(plotHeight) / (finePeakAdc - minAdcValue);
-
-  // Plot fine sweep data (inverted Y-axis)
-  for (int i = 0; i < fineSweepCount - 1; i++)
-  {
-    int x1 = 30 + (fine_sweep_frequ[i] - fineFreqStart) * freqScale;
-    int y1 = topMargin + (fine_sweep_adc[i] - minAdcValue) * adcScale; // Inverted: higher ADC = higher y-value
-    int x2 = 30 + (fine_sweep_frequ[i + 1] - fineFreqStart) * freqScale;
-    int y2 = topMargin + (fine_sweep_adc[i + 1] - minAdcValue) * adcScale; // Inverted: higher ADC = higher y-value
-
-    tft.drawLine(x1, y1, x2, y2, TFT_GREEN);
-  }
-
-  // Draw vertical line at resonance frequency
-  int resonanceX = 30 + (resonanceFreq - fineFreqStart) * freqScale;
-  tft.drawLine(resonanceX, topMargin, resonanceX, 240 - bottomMargin, TFT_GOLD);
-
-  // Draw black frame for frequency label
-  tft.fillRect(0, 240 - bottomMargin, 320, bottomMargin, TFT_BLACK);
-
-  // Display the resonance frequency
-  tft.setTextColor(TFT_GOLD, TFT_BLACK);
-  // Display the resonance frequency with " Hz"
-  String resonanceString = formatFrequencyWithDots(resonanceFreq) + " Hz"; // Concatenate " Hz"
-  tft.setTextColor(TFT_GOLD, TFT_BLACK);
-  tft.drawCentreString(resonanceString, 160, 220, 4);
-}
-
-unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
-{
-  bool verbose = false;
-
-  // === Sweep Configuration ===
-  const unsigned long coarseStepHz = 20000UL;
-
-  const unsigned long fineSpanHz = 400000UL;
-  int fineAdcSamples = 1;
-
-  int frequChangeDelay = 0;
-  int sweepCounter = 0;
-  int minAdcValue = 4096;
-
-  // Temporary buffers
-  unsigned long tempFreq[MAX_SWEEP_POINTS];
-  int tempAdc[MAX_SWEEP_POINTS];
-  int tempCount = 0;
-
-  si5351.set_clock_pwr(SI5351_CLK0, 1); // Power on SI5351 clock 0
-
-  // === COARSE SWEEP ===
-  if (verbose)
-    Serial.println("🔶 --- COARSE SWEEP START ---");
-
-  for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
-  {
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
-    delay(frequChangeDelay);
-    int adcValue = readAveragedAdc(ADC_PIN, 1);
-
-    if (verbose)
-      Serial.printf("🟨 COARSE;%d;%lu;%d\n", sweepCounter, freqHz, adcValue);
-
-    sweepCounter++;
-
-    if (tempCount < MAX_SWEEP_POINTS)
-    {
-      tempFreq[tempCount] = freqHz;
-      tempAdc[tempCount] = adcValue;
-      tempCount++;
-
-      if (adcValue < minAdcValue)
-        minAdcValue = adcValue;
-    }
-  }
-
-  coarseSweepCount = tempCount;
-  coarsePeakAdc = 0;
-  coarsePeakFreq = 0;
-
-  for (int i = 0; i < tempCount; i++)
-  {
-    coarse_sweep_frequ[i] = tempFreq[i];
-    coarse_sweep_adc[i] = tempAdc[i];
-
-    if (tempAdc[i] > coarsePeakAdc)
-    {
-      coarsePeakAdc = tempAdc[i];
-      coarsePeakFreq = tempFreq[i];
-    }
-  }
-
-  if (verbose)
-  {
-    Serial.printf("🟡 COARSE_MAX_ADC: %d at %lu Hz\n", coarsePeakAdc, coarsePeakFreq);
-    Serial.println("🔶 --- COARSE SWEEP END ---");
-  }
-
-  // === FINE SWEEP ===
-  if (verbose)
-    Serial.println("🔷 --- FINE SWEEP START ---");
-
-  fineAdcSamples = 2;
-  tempCount = 0;
-
-  for (int i = 0; i < MAX_SWEEP_POINTS; i++)
-  {
-    tempFreq[i] = 0;
-    tempAdc[i] = 0;
-  }
-
-  unsigned long fineStartHz = coarsePeakFreq - fineSpanHz / 2;
-  unsigned long fineStopHz = coarsePeakFreq + fineSpanHz / 2;
-
-unsigned long spanHz = fineStopHz - fineStartHz;
-unsigned long safeStepHz = max(1UL, spanHz / 360);
-
-if (verbose)
-  Serial.printf("🔹 FINE SWEEP RANGE: %lu Hz ➝ %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, safeStepHz);
-
-for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += safeStepHz) {
-
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
-    delay(frequChangeDelay);
-    int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
-
-    if (verbose)
-      Serial.printf("🔹 FINE;%d;%lu;%d\n", sweepCounter, freqHz, adcValue);
-
-    sweepCounter++;
-
-    if (tempCount < MAX_SWEEP_POINTS)
-    {
-      tempFreq[tempCount] = freqHz;
-      tempAdc[tempCount] = adcValue;
-      tempCount++;
-
-      if (adcValue < minAdcValue)
-        minAdcValue = adcValue;
-    }
-  }
-
-  fineSweepCount = tempCount;
-  finePeakAdc = 0;
-  finePeakFreq = 0;
-
-  for (int i = 0; i < tempCount; i++)
-  {
-    fine_sweep_frequ[i] = tempFreq[i];
-    fine_sweep_adc[i] = tempAdc[i];
-
-    if (tempAdc[i] > finePeakAdc)
-    {
-      finePeakAdc = tempAdc[i];
-      finePeakFreq = tempFreq[i];
-    }
-  }
-
-  if (verbose)
-  {
-    Serial.printf("🔵 FINE_MAX_ADC: %d at %lu Hz\n", finePeakAdc, finePeakFreq);
-    Serial.println("🔷 --- FINE SWEEP END ---");
-  }
-
-  // === SUMMARY ===
-  if (verbose)
-  {
-    Serial.println("📊 --- SWEEP SUMMARY ---");
-    Serial.printf("📉 NOISE FLOOR: %d\n", minAdcValue);
-    Serial.printf("📈 ADC RANGE (Delta): %d\n", finePeakAdc - minAdcValue);
-    Serial.printf("🎯 FINAL RESONANCE FREQUENCY: %lu Hz\n", finePeakFreq);
-    Serial.println("✅ SWEEP COMPLETE");
-  }
-
-  resonanceFrequ = finePeakFreq;
-  bestAdcAtSweep = finePeakAdc;
-  noiseFloor = minAdcValue;
-  range = finePeakAdc - minAdcValue;
-
-  plotFineSweep(fine_sweep_frequ, fine_sweep_adc, fineSweepCount, coarsePeakFreq - fineSpanHz / 2, coarsePeakFreq + fineSpanHz / 2, minAdcValue, finePeakAdc, resonanceFrequ);
-
-  si5351.set_clock_pwr(SI5351_CLK0, 0); // Turn off SI5351
-
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  delay(2000);
   return resonanceFrequ;
 }
 
@@ -3083,40 +2685,6 @@ void clearDisplayLine()
 
 // keypad
 // related to keypad
-void initSI5351()
-{
-  const uint8_t SI5351_ADDRESS = 0x60;
-
-  Wire.begin(); // Start I2C (you can customize pins if needed)
-
-  // 🧪 Check if Si5351 is responding on I²C
-  Wire.beginTransmission(SI5351_ADDRESS);
-  if (Wire.endTransmission() != 0)
-  {
-    Serial.println("❌ Si5351 not found at 0x60. Check wiring or power.");
-    displayKeypadOrSImoduleError();
-  }
-
-  Serial.println("✅ Success! Si5351 module found!! 🎉");
-  Serial.println("📡 Initializing Si5351...");
-
-  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
-
-  Serial.print("🔧 Applying Calibration Factor: ");
-  Serial.println(cal_factor);
-  si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
-
-  Serial.print("📶 Setting TX Reference Frequency: ");
-  Serial.print(TX_referenceFrequ);
-  Serial.println(" Hz");
-  si5351.set_freq(TX_referenceFrequ, SI5351_CLK0);
-
-  Serial.println("💪 Setting Drive Strength: 8 mA");
-  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
-
-  Serial.println("🔌 Powering down CLK0 output initially.");
-  si5351.set_clock_pwr(SI5351_CLK0, 0);
-}
 
 void initKeypad()
 {
@@ -3125,18 +2693,20 @@ void initKeypad()
   if (!cap.begin(0x5A))
   {
     Serial.println("❌ KeyPad error");
-    displayKeypadOrSImoduleError();
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawCentreString("KEYPAD ERROR", tft.width() / 2, tft.height() / 2, 4);
+    while (1)
+      ;
   }
   else
   {
-    Serial.println("✅ Keypad detected and ready");
+    Serial.println("✅ MPR121 + TFT Ready");
   }
 }
 
 void IRAM_ATTR handleTouchIRQ()
 {
   touchInterrupt = true;
-  Serial.println("touche");
 }
 
 String formatFrequencyWithDotsFKPF(const String &s)
@@ -3256,7 +2826,7 @@ void displayMainMenu()
       "[2] WSPR Transmitter",
       "[3] CW Beacon",
       "[4] VFO",
-      "[5] Analyze",
+      "[5] Diagnostic",
       "[6] About",
       "[0] Reboot"};
 
@@ -3281,35 +2851,44 @@ void displayMainMenu()
   // 🔹 Console output and state
   Serial.println("\n🧭 Waiting for user to select a main menu option (keys 0–6)...");
   modeOfOperation = 9; // Main menu handling
+  Serial.println(APmode);
 }
 
-void displayAnalyzeMenu()
+bool initSI5351()
 {
-  // 🔹 Header and screen setup
-  tft.fillScreen(TFT_NAVY);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.fillRect(0, 0, 320, 30, TFT_BLACK);
-  tft.drawCentreString("Band Analyzer", 160, 4, 4);
+  const uint8_t SI5351_ADDRESS = 0x60;
 
-  // 🔹 Subtitle
-  tft.setTextColor(TFT_GOLD, TFT_NAVY);
-  tft.setFreeFont(&FreeMonoBold12pt7b);
-  tft.drawCentreString("Select Desired Band", 160, 40, 1);
+  Wire.begin(); // Start I2C (you can customize pins if needed)
 
-  tft.setFreeFont(&FreeMono9pt7b);
-  tft.setTextColor(TFT_WHITE, TFT_NAVY);
-  int x = 16;
-  int y = 65;
-  int lineGap = 24;
-
-  for (uint8_t i = 0; i < sizeof(sweepMenuItems) / sizeof(sweepMenuItems[0]); i++)
+  // 🧪 Check if Si5351 is responding on I²C
+  Wire.beginTransmission(SI5351_ADDRESS);
+  if (Wire.endTransmission() != 0)
   {
-    tft.drawString(sweepMenuItems[i], x, y);
-    y += lineGap;
+    Serial.println("❌ Si5351 not found at 0x60. Check wiring or power.");
+    return false;
   }
 
-  // 🔹 Console output and state
-  Serial.println("\n🧭 Waiting for user to select a main menu option (keys 0–6)...");
+  Serial.println("✅ Success! Si5351 module found!! 🎉");
+  Serial.println("📡 Initializing Si5351...");
+
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+
+  Serial.print("🔧 Applying Calibration Factor: ");
+  Serial.println(cal_factor);
+  si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
+
+  Serial.print("📶 Setting TX Reference Frequency: ");
+  Serial.print(TX_referenceFrequ);
+  Serial.println(" Hz");
+  si5351.set_freq(TX_referenceFrequ, SI5351_CLK0);
+
+  Serial.println("💪 Setting Drive Strength: 8 mA");
+  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+
+  Serial.println("🔌 Powering down CLK0 output initially.");
+  si5351.set_clock_pwr(SI5351_CLK0, 0);
+
+  return true;
 }
 
 void displayMessageAndReboot()
@@ -3317,19 +2896,20 @@ void displayMessageAndReboot()
 
   tft.fillScreen(TFT_BLACK);
 
-  tft.setTextSize(2);
+  tft.setTextSize(1);
   tft.setTextColor(TFT_GOLD, TFT_BLACK);
 
-  tft.drawCentreString("73! de HB9IIU", 160, 150, 2);
+  tft.setFreeFont(&Orbitron_Light_32);
+  tft.drawCentreString("73! de HB9IIU", 160, 150, 1);
 
-  tft.setTextSize(2);
+  tft.setTextSize(1);
   for (int i = 0; i < 5; i++)
   {
     tft.setTextColor(TFT_RED, TFT_BLACK);
-    tft.drawCentreString("REBOOTING", 160, 60, 2);
+    tft.drawCentreString("REBOOTING", 160, 60, 1);
     delay(120);
     tft.setTextColor(TFT_BLACK, TFT_BLACK);
-    tft.drawCentreString("REBOOTING", 160, 60, 2);
+    tft.drawCentreString("REBOOTING", 160, 60, 1);
     delay(120);
   }
 
@@ -3463,31 +3043,4 @@ void displaySelecetdBandInformation(byte bandIndex)
   Serial.println("📏 Bandwidth used: ~6 Hz centered around selected frequency");
   Serial.println("---------------------------------------------------------------------");
   Serial.println();
-}
-
-void displayKeypadOrSImoduleError()
-{
-
-  tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.setTextSize(2);
-  tft.drawCentreString("I2c ERROR", tft.width() / 2, tft.height() / 4 - 25, 4);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_GOLD);
-  tft.drawCentreString("Si5351 Module or Keypad", tft.width() / 2, tft.height() / 2 - 20, 4);
-  tft.drawCentreString("Not Found!", tft.width() / 2, tft.height() / 2 + 20, 4);
-
-  tft.setTextColor(TFT_GOLD);
-  tft.setFreeFont(&FreeMonoBold12pt7b);
-  tft.drawCentreString("Check Your Wirings", tft.width() / 2, tft.height() / 4 * 3, 4);
-  delay(3000);
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_RED);
-  tft.setTextSize(2);
-  tft.drawCentreString("RESTARTING", tft.width() / 2, tft.height() / 4, 4);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_GOLD);
-  tft.setFreeFont(&FreeMonoBold12pt7b);
-  tft.drawCentreString("73! de HB9IIU", tft.width() / 2, tft.height() / 4 * 3, 4);
-  delay(2000);
-  ESP.restart();
 }

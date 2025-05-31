@@ -15,10 +15,8 @@
         <header>
             <!-- Fixed navbar -->
             <nav class="navbar navbar-expand-md navbar-dark fixed-top bg-dark">
-                <div class="container-fluid">
-                    <a class="navbar-brand" href="index.html">Web WSPR Beacon</a>
-                    <button aria-controls="navbarCollapse" aria-expanded="false" aria-label="Toggle navigation" class="navbar-toggler" data-bs-target="#navbarCollapse" data-bs-toggle="collapse" type="button">
-                        <span class="navbar-toggler-icon"></span>
+                <div class="container-fluid"><a class="navbar-brand" href="index.html">Web WSPR Beacon</a>
+                    <button aria-controls="navbarCollapse" aria-expanded="false" aria-label="Toggle navigation" class="navbar-toggler" data-bs-target="#navbarCollapse" data-bs-toggle="collapse" type="button"><span class="navbar-toggler-icon"></span>
                     </button>
                 </div>
             </nav>
@@ -29,23 +27,28 @@
                 <div class="row">
                     <h4 id="progressText" style="text-align: center;">si5351 Module Calibration</h4>
                     <!-- Larger frame for '.....' -->
-                    <div class="custom-frame mx-auto mb-3">
-                        <span id="numberDisplay">.....</span>
+                    <div class="custom-frame mx-auto mb-3"><span id="numberDisplay">.....</span>
                     </div>
                 </div>
                 <div class="container text-center button-group">
-                    <button class="btn btn-primary mr-2" onclick="changeNumber(1000)" type="button"><i class="fas fa-fast-backward"></i>
+                    <button class="btn btn-primary mr-2" onclick="changeNumber(1000)" type="button">
+                        <i class="fas fa-fast-backward"></i>
                     </button>
-                    <button class="btn btn-primary mr-2" onclick="changeNumber(100)" type="button"><i class="fas fa-angle-double-left"></i>
+                    <button class="btn btn-primary mr-2" onclick="changeNumber(100)" type="button">
+                        <i class="fas fa-angle-double-left"></i>
                     </button>
-                    <button class="btn btn-primary mr-2" onclick="changeNumber(10)" type="button"><i class="fas fa-angle-left"></i>
+                    <button class="btn btn-primary mr-2" onclick="changeNumber(10)" type="button">
+                        <i class="fas fa-angle-left"></i>
                     </button>
                     <button class="btn btn-primary mr-2" onclick="resetNumber()" type="button">0</button>
-                    <button class="btn btn-primary mr-2" onclick="changeNumber(-10)" type="button"><i class="fas fa-angle-right"></i>
+                    <button class="btn btn-primary mr-2" onclick="changeNumber(-10)" type="button">
+                        <i class="fas fa-angle-right"></i>
                     </button>
-                    <button class="btn btn-primary mr-2" onclick="changeNumber(-100)" type="button"><i class="fas fa-angle-double-right"></i>
+                    <button class="btn btn-primary mr-2" onclick="changeNumber(-100)" type="button">
+                        <i class="fas fa-angle-double-right"></i>
                     </button>
-                    <button class="btn btn-primary mr-2" onclick="changeNumber(-1000)" type="button"><i class="fas fa-fast-forward"></i>
+                    <button class="btn btn-primary mr-2" onclick="changeNumber(-1000)" type="button">
+                        <i class="fas fa-fast-forward"></i>
                     </button>
                 </div>
                 <div class="save-button">
@@ -56,8 +59,7 @@
                         <div class="modal-content">
                             <div class="modal-header">
                                 <h5 class="modal-title" id="saveModalLabel">Saving Calibration Factor</h5>
-                                <button aria-label="Close" class="close" data-bs-dismiss="modal" type="button">
-                                    <span aria-hidden="true">&times;</span>
+                                <button aria-label="Close" class="close" data-bs-dismiss="modal" type="button"><span aria-hidden="true">&times;</span>
                                 </button>
                             </div>
                             <div class="modal-body">
@@ -86,8 +88,7 @@
             </div>
         </main>
         <footer class="footer mt-auto py-3 bg-light">
-            <div class="container">
-                <span class="text-muted">HB9IIU May 2025</span>
+            <div class="container"><span class="text-muted">HB9IIU May 2025</span>
             </div>
         </footer>
         <!-- JavaScript script -->

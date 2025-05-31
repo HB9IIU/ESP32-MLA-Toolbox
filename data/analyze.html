@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Diagnostic Sweep Viewer</title>
+        <!-- Bootstrap 5 CSS -->
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+        <!-- Highcharts Core + Exporting -->
+        <script src="https://code.highcharts.com/highcharts.js"></script>
+        <script src="https://code.highcharts.com/modules/exporting.js"></script>
+        <style>body { padding-top: 80px; display: flex; flex-direction: column; min-height: 100vh; } main.container { flex: 1; } .chart-container { margin-bottom: 40px; }</style>
+    </head>
+    <body>
+        <!-- Top Navigation -->
+        <nav class="navbar navbar-expand-md navbar-dark bg-dark fixed-top">
+            <div class="container-fluid justify-content-center"><a class="navbar-brand mx-auto" href="#" style="font-size: 26px;">Mag Loop Resonance Analyzer</a>
+            </div>
+        </nav>
+        <main class="container">
+            <!-- Coarse Sweep -->
+            <div class="row" data-pg-collapsed>
+                <div class="container">
+                    <div class="col-md-12">
+                        <div class="chart-container">
+                            <h4 id="coarseTitle" class="text-center"></h4>
+                            <div id="coarseChart"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="container">
+                    <div class="col-md-12">
+                        <div class="chart-container">
+                            <h4 id="fineTitle" class="text-center"></h4>
+                            <div id="fineChart"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="row">
+                <div class="container">
+                    <div class="col-md-12">
+                        <h4>How to Read This Chart</h4>
+                        <p style="font-size: 18px;">
+                    This is not a traditional SWR curve like you'd see on a VNA.<br>
+                    Instead, the sweep shows the response of a simple RF detector connected to an SWR bridge, where the displayed values are inverted: lower RF at the detector means a higher value on the graph.<br>
+                    At resonance, the antenna absorbs the most power, so the reflected signal drops — and this appears as a dip in the curve.<br>
+                    This tool doesn’t measure absolute SWR or impedance, but it gives you a clear indication of whether the antenna is resonating, and at approximately what frequency.<br>
+                    That’s usually all you need for tuning loops or checking basic antenna behavior.</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+        <!-- Footer -->
+        <footer class="text-center text-light py-4 mt-5 bg-dark"><small>&copy; 2025 HB9IIU – Magnetic Loop Antenna Toolbox</small>
+        </footer>
+        <script>
+    let chartCoarse, chartFine;
+
+    function formatHz(freq) {
+        return freq.toLocaleString('de-CH').replace(/,/g, '.') + ' Hz';
+    }
+
+    function updateCharts(data) {
+        if (!data.coarse || !data.fine || !data.coarseMaxFreq || !data.fineMaxFreq) {
+            console.warn("⚠️ Missing expected sweep data fields.");
+            return;
+        }
+
+        const coarseData = data.coarse.map(p => [p[0], p[1]]);
+        const fineData   = data.fine.map(p => [p[0], p[1]]);
+        const coarsePeakHz = data.coarseMaxFreq;
+        const finePeakHz   = data.fineMaxFreq;
+
+        const coarseTitle = `
+            Coarse Sweep
+            <span class="text-muted" style="font-size: 70%;"><em>(${coarseData.length} points)</em></span>
+            – Resonance at approx. <strong>${formatHz(coarsePeakHz)}</strong>
+        `;
+
+        const fineTitle = `
+            Fine Sweep
+            <span class="text-muted" style="font-size: 70%;"><em>(${fineData.length} points)</em></span>
+            – Resonance at approx. <strong>${formatHz(finePeakHz)}</strong>
+        `;
+
+        document.getElementById('coarseTitle').innerHTML = coarseTitle;
+        document.getElementById('fineTitle').innerHTML   = fineTitle;
+
+        if (!chartCoarse) {
+            chartCoarse = Highcharts.chart('coarseChart', {
+                chart: {
+                    type: 'line',
+                    height: 300,
+                    zoomType: 'x'
+                },
+                title: { text: null },
+                xAxis: {
+                    title: { text: 'Frequency (MHz)' },
+                    labels: {
+                        formatter: function () {
+                            return (this.value / 1e6).toFixed(3);
+                        }
+                    },
+                    plotLines: [{
+                        color: 'red',
+                        width: 2,
+                        dashStyle: 'Dash',
+                        value: coarsePeakHz
+                    }]
+                },
+                yAxis: {
+                    title: { text: 'ADC Value' },
+                    reversed: true
+                },
+                legend: { enabled: false },
+                series: [{ name: 'ADC', data: coarseData }],
+                credits: { enabled: false },
+                exporting: { enabled: true },
+                accessibility: { enabled: false }
+            });
+        } else {
+            chartCoarse.series[0].setData(coarseData);
+            chartCoarse.xAxis[0].update({
+                plotLines: [{
+                    color: 'red',
+                    width: 2,
+                    dashStyle: 'Dash',
+                    value: coarsePeakHz
+                }]
+            });
+            chartCoarse.yAxis[0].update({ reversed: true });
+            chartCoarse.setTitle({ text: null });
+        }
+
+        if (!chartFine) {
+            chartFine = Highcharts.chart('fineChart', {
+                chart: {
+                    type: 'line',
+                    zoomType: 'x'
+                },
+                title: { text: null },
+                xAxis: {
+                    title: { text: 'Frequency (Hz)' },
+                    labels: {
+                        formatter: function () {
+                            return this.value.toLocaleString('de-CH').replace(/,/g, '.');
+                        }
+                    },
+                    plotLines: [{
+                        color: 'green',
+                        width: 2,
+                        dashStyle: 'Dash',
+                        value: finePeakHz
+                    }]
+                },
+                yAxis: {
+                    title: { text: 'ADC Value' },
+                    reversed: true
+                },
+                legend: { enabled: false },
+                series: [
+                    {
+                        name: 'ADC (Raw)',
+                        data: fineData,
+                        type: 'line',
+                        marker: { enabled: false }
+                    },
+                    {
+                        name: 'ADC (Spline)',
+                        data: fineData,
+                        type: 'spline',
+                        color: 'orange',
+                        marker: { enabled: false },
+                        enableMouseTracking: false,
+                        linkedTo: ':previous'
+                    }
+                ],
+                credits: { enabled: false },
+                exporting: { enabled: true },
+                accessibility: { enabled: false }
+            });
+        } else {
+            chartFine.series[0].setData(fineData);
+            chartFine.series[1].setData(fineData);
+            chartFine.xAxis[0].update({
+                plotLines: [{
+                    color: 'green',
+                    width: 2,
+                    dashStyle: 'Dash',
+                    value: finePeakHz
+                }]
+            });
+            chartFine.yAxis[0].update({ reversed: true });
+            chartFine.setTitle({ text: null });
+        }
+    }
+
+    async function fetchSweepData() {
+        try {
+            const response = await fetch('/sweepdata');
+            const data = await response.json();
+
+            console.log("📶 Sweep data received:", data);
+            updateCharts(data);
+        } catch (error) {
+            console.error("❌ Error fetching sweep data:", error);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        fetchSweepData();
+        setInterval(fetchSweepData, 4000);
+    });
+</script>
+    </body>
+</html>

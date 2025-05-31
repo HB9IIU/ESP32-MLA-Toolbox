@@ -10,7 +10,19 @@
   <component name="ChangeListManager">
     <list default="true" id="b3707aef-4e55-4441-ae0c-44ef0adad628" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/assets/_pginfo/fonts.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/assets/favicon.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/assets/js/popper.min.js" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/assets/pinegrow.json" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/assets/spectrum.jpg" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/assets/warning.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/assets/wsprlogo.png" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/calibrate.html" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/diagnostic.html" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/index.html" beforeDir="false" afterPath="$PROJECT_DIR$/index.html" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/newclock.html" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/pinegrow.json" beforeDir="false" afterPath="$PROJECT_DIR$/pinegrow.json" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/../platformio.ini" beforeDir="false" afterPath="$PROJECT_DIR$/../platformio.ini" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/../src/main.cpp" beforeDir="false" afterPath="$PROJECT_DIR$/../src/main.cpp" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
@@ -31,6 +43,7 @@
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+    "JavaScript Debug.analyze.html.executor": "Run",
     "JavaScript Debug.ap.html.executor": "Run",
     "JavaScript Debug.clock.html.executor": "Run",
     "JavaScript Debug.index.html.executor": "Run",
@@ -58,7 +71,10 @@
       <recent name="$PROJECT_DIR$/bootstrap" />
     </key>
   </component>
-  <component name="RunManager" selected="JavaScript Debug.ap.html">
+  <component name="RunManager" selected="JavaScript Debug.analyze.html">
+    <configuration name="analyze.html" type="JavascriptDebugType" temporary="true" nameIsGenerated="true" uri="http://localhost:63342/data/analyze.html" useBuiltInWebServerPort="true">
+      <method v="2" />
+    </configuration>
     <configuration name="ap.html" type="JavascriptDebugType" temporary="true" nameIsGenerated="true" uri="http://localhost:63342/data/ap.html" useBuiltInWebServerPort="true">
       <method v="2" />
     </configuration>
@@ -73,9 +89,10 @@
     </configuration>
     <recent_temporary>
       <list>
-        <item itemvalue="JavaScript Debug.ap.html" />
+        <item itemvalue="JavaScript Debug.analyze.html" />
         <item itemvalue="JavaScript Debug.index.html" />
         <item itemvalue="JavaScript Debug.newclock.html" />
+        <item itemvalue="JavaScript Debug.ap.html" />
         <item itemvalue="JavaScript Debug.clock.html" />
       </list>
     </recent_temporary>
@@ -98,7 +115,8 @@
       <workItem from="1747556778037" duration="1876000" />
       <workItem from="1747567833508" duration="38483000" />
       <workItem from="1747816956084" duration="303000" />
-      <workItem from="1748417512213" duration="17489000" />
+      <workItem from="1748417512213" duration="18191000" />
+      <workItem from="1748605700374" duration="13374000" />
     </task>
     <servers />
   </component>
