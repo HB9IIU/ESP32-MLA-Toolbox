@@ -25,7 +25,9 @@
 #include <HTTPClient.h> // used for wsprrock query
 #include <ESPmDNS.h>    // Library to enable mDNS (Multicast DNS) for resolving local hostnames like "device.local"
 #include <Adafruit_MPR121.h>
-// Include the necessary library for Savitzky-Golay (assuming it's already added to your project)
+// Include the necessary library for Savitzky-Golay 
+#include <SavitzkyGolayFilter.h>
+// https://github.com/uutzinger/SavitzkyGolayFilter
 //------------------------------------
 #include <PNGdec.h> //PNG image decoding library
 
@@ -295,7 +297,7 @@ bool APmode = true;
 String scannedNetworksJson;
 // Optional network configuration
 
-char call[8]; // USER CALLSIGN will be retrieved through preferences 
+char call[8]; // USER CALLSIGN will be retrieved through preferences
 char loc[7];  // USER MAIDENHEAD GRID LOCATOR first 6 letters.
 uint32_t power_mW;
 uint8_t dbm = 24;
@@ -509,12 +511,7 @@ void loop()
   {
     Serial.println("\nEntering WSPR loop");
 
-    unsigned long now = millis();
-
  
-
-    timeClient.update();
-
     if (isFirstIteration)
     {
       Serial.println("\nFirst Loop Iteration to determine next start");
@@ -527,15 +524,22 @@ void loop()
       tft.drawCentreString("http://mlatoolbox.local", TFT_WIDTH / 2, TFT_HEIGHT / 2, 4);
       tft.drawCentreString("for web reporter", TFT_WIDTH / 2, TFT_HEIGHT / 4 * 3, 4);
     }
-   // 🔄 Fetch WSPR data every 5 minutes
+ unsigned long now = millis();
+
+    timeClient.update();
+
+
+    // 🔄 Fetch WSPR data every 5 minutes
     if (now - lastWSPRfetchTime >= WSPRfetchInterval || lastWSPRfetchTime == 0)
     {
       Serial.println("🌐 Fetching new WSPR data...");
       fetchDataFromWSPRrocks();
       lastWSPRfetchTime = now;
-      WSPRscreenCycleIndex = 0; // Restart screen cycle
-      lastWSPRScreenChange = now;
+      //WSPRscreenCycleIndex = 0; // Restart screen cycle
+      //lastWSPRScreenChange = now;
+      now = millis();
     }
+  
 
     currentEpochTime = timeClient.getEpochTime();
     Serial.print("\nCurrent time: ");
@@ -553,6 +557,7 @@ void loop()
     Serial.print("Next transmission in ");
     Serial.print(initialRemainingSeconds);
     Serial.println(" [s]");
+    int previousRemainingSeconds = -1; // or static if you keep it between WSPR sessions
 
     // Wait until the next transmission time
     while (timeClient.getEpochTime() != nextPosixTxTime && interruptWSPRcurrentTX == false)
@@ -570,33 +575,48 @@ void loop()
         initialRemainingSeconds = 5;
       }
 
-      unsigned long now = millis();
+      now = millis(); // reuse global 'now'
 
-      // 🔁 Cycle through 3 displays every 4 seconds
-      if (now - lastWSPRScreenChange >= 4000)
+      if (now - lastWSPRScreenChange >= 15000)
       {
         switch (WSPRscreenCycleIndex)
         {
         case 0:
-          drawEURmapWithSpots(); // 🗺️ Europe view
-    tft.setFreeFont(&FreeSansBold12pt7b);
-          tft.drawString("Next tx in " + String(currentRemainingSeconds) + " s   ", 1,1,4);
-
-
-          
+          drawEURmapWithSpots();
+          tft.setFreeFont(&FreeSans9pt7b);
+          tft.drawCentreString("Next TX in " + String(currentRemainingSeconds) + " s", TFT_WIDTH / 2, 3, 1);
           break;
+
         case 1:
-          drawWorldMapWithSpots(); // 🌍 World view
-  
-          tft.drawCentreString(("Next tx in " + String(currentRemainingSeconds) + " s   "),TFT_WIDTH/2,220,4);
+          drawWorldMapWithSpots();
+          tft.setFreeFont(&FreeSans9pt7b);
+          tft.drawCentreString("Next TX in " + String(currentRemainingSeconds) + " s", TFT_WIDTH / 2, 220, 1);
           break;
+
         case 2:
-          drawTop10WSPRtable(); // 📋 Table view
+          drawTop10WSPRtable();
           break;
         }
 
-        WSPRscreenCycleIndex = (WSPRscreenCycleIndex + 1) % 3; // ➕ Loop 0 → 1 → 2 → 0 ...
+        WSPRscreenCycleIndex = (WSPRscreenCycleIndex + 1) % 3;
         lastWSPRScreenChange = now;
+      }
+
+      //Serial.println("I am here...");
+      //Serial.println(WSPRscreenCycleIndex);
+      if (currentRemainingSeconds != previousRemainingSeconds)
+      {
+        previousRemainingSeconds = currentRemainingSeconds;
+
+        if (WSPRscreenCycleIndex == 1)
+        {
+          tft.drawCentreString("Next TX in " + String(currentRemainingSeconds) + " s   ", TFT_WIDTH / 2, 3, 1);
+        }
+
+        if (WSPRscreenCycleIndex == 2)
+        {
+          tft.drawCentreString("Next TX in " + String(currentRemainingSeconds) + " s   ", TFT_WIDTH / 2, 220, 1);
+        }
       }
     }
     Serial.println(); // Move to a new line after the countdown ends
@@ -605,6 +625,7 @@ void loop()
     nextPosixTxTime = nextPosixTxTime + intervalBetweenTx;
 
     Serial.println("\nStarting transmission");
+    drawTop10WSPRtable();
     startTransmission();
     // 🛑 Transmission End
     // if (modeOfOperation == 4)
@@ -3747,7 +3768,7 @@ void fetchDataFromWSPRrocks()
                         String("FROM RankedRecords\n") +
                         String("WHERE rn = 1\n") +
                         String("ORDER BY distance DESC\n") +
-                        String("LIMIT 50;");
+                        String("LIMIT 11;");
   String encodedQuery = WSPRurlencode(uncodedQuery);
 
   String fullURL = "https://db1.wspr.live:443/?query=" + encodedQuery;

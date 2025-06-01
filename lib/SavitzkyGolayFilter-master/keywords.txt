@@ -1,0 +1,15 @@
+##############################
+# Syntax Coloring for SavLayFilter
+##############################
+
+##############################
+# Datatypes (KEYWORD1)
+##############################
+
+SavitzkyGolayFilter	KEYWORD1
+
+##############################
+# Methods and Functions (KEYWORD2)
+##############################
+
+update	KEYWORD2
