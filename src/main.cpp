@@ -22,7 +22,8 @@
 #include "ESPAsyncWebServer.h"
 #include "Preferences.h"
 #include <ArduinoJson.h>
-#include <ESPmDNS.h> // Library to enable mDNS (Multicast DNS) for resolving local hostnames like "device.local"
+#include <HTTPClient.h> // used for wsprrock query
+#include <ESPmDNS.h>    // Library to enable mDNS (Multicast DNS) for resolving local hostnames like "device.local"
 #include <Adafruit_MPR121.h>
 // Include the necessary library for Savitzky-Golay (assuming it's already added to your project)
 //------------------------------------
@@ -190,6 +191,59 @@ int cwBeaconMessageCursorX = 10;  // Start X position for text
 int cwBeaconMessageCursorY = 156; // Y position for text
 
 //---------------------------------------------------------------------------------------------
+// WSPR MAP and TABLE REALTED
+float homeLatitude = 46.0; // default fallback
+float homeLongitude = 6.0; // default fallback
+int timeZoneOffsetInHoursForWSPRtable = 2;
+int hoursToSubtractInWSPRquery = 24; // default fallback value
+const int maxWSPRentries = 50;
+// char call[8]; // USER CALLSIGN, loaded from preferences
+// char loc[7];  // USER MAIDENHEAD GRID LOCATOR first 6 letters.
+struct WSPRspot
+{
+  String time;
+  String callsign;
+  String band;
+  String distance;
+  float lat;
+  float lon;
+};
+WSPRspot WSPRspots[maxWSPRentries];
+int totalWSPRentries = 0;
+unsigned long lastWSPRfetchTime = 0;
+unsigned long lastWSPRScreenChange = 0;
+int WSPRscreenCycleIndex = 0;
+const unsigned long WSPRfetchInterval = 5 * 60 * 1000; // 5 minutes
+struct WSPRbandMap
+{
+  int bandValue;
+  const char *bandLabel;
+};
+WSPRbandMap bands[] = {
+    {3, "80"}, {5, "60"}, {7, "40"}, {10, "30"}, {14, "20"}, {18, "17"}, {21, "15"}, {24, "12"}, {28, "10"}, {50, "6"}};
+int numberOfWSPRbands = sizeof(bands) / sizeof(bands[0]);
+String WSPRurlencode(const String &str);
+const char *getWSPRBandLabel(int bandValue)
+{
+  for (int i = 0; i < numberOfWSPRbands; i++)
+  {
+    if (bands[i].bandValue == bandValue)
+      return bands[i].bandLabel;
+  }
+  return "Unknown";
+}
+void getLatLonFromLocatorForWSPR(const char *locator);
+void drawTop10WSPRtable();
+void printWSPRSpotData();
+void fetchDataFromWSPRrocks();
+void drawGreatCircleWorld(float lat1, float lon1, float lat2, float lon2, uint16_t color);
+void drawGreatCircleEurope(float lat1, float lon1, float lat2, float lon2, uint16_t color);
+void drawEURmapWithSpots();
+void drawWorldMapWithSpots();
+
+//---------------------------------------------------------------------------------------------
+
+//---------------------------------------------------------------------------------------------
 // Create AsyncWebServer object on port 80
 AsyncWebServer server(80);
 
@@ -241,7 +295,7 @@ bool APmode = true;
 String scannedNetworksJson;
 // Optional network configuration
 
-char call[7]; // USER CALLSIGN will be retrieved through preferences
+char call[8]; // USER CALLSIGN will be retrieved through preferences 
 char loc[7];  // USER MAIDENHEAD GRID LOCATOR first 6 letters.
 uint32_t power_mW;
 uint8_t dbm = 24;
@@ -275,6 +329,9 @@ void setup()
 
   // Retrieve user settings
   retrieveUserSettings();
+
+  // get lazt lon from loactor for WSPR mpas
+  getLatLonFromLocatorForWSPR(loc);
 
   initTFT();
 
@@ -452,6 +509,10 @@ void loop()
   {
     Serial.println("\nEntering WSPR loop");
 
+    unsigned long now = millis();
+
+ 
+
     timeClient.update();
 
     if (isFirstIteration)
@@ -460,6 +521,20 @@ void loop()
       initializeNextTransmissionTime();
       isFirstIteration = false;
       interruptWSPRcurrentTX = false;
+      tft.fillRect(0, 25, 320, 240, TFT_BLACK);
+      tft.setTextColor(TFT_GOLD, TFT_BLACK);
+      tft.drawCentreString("Visit", TFT_WIDTH / 2, TFT_HEIGHT / 2 / 2, 4);
+      tft.drawCentreString("http://mlatoolbox.local", TFT_WIDTH / 2, TFT_HEIGHT / 2, 4);
+      tft.drawCentreString("for web reporter", TFT_WIDTH / 2, TFT_HEIGHT / 4 * 3, 4);
+    }
+   // 🔄 Fetch WSPR data every 5 minutes
+    if (now - lastWSPRfetchTime >= WSPRfetchInterval || lastWSPRfetchTime == 0)
+    {
+      Serial.println("🌐 Fetching new WSPR data...");
+      fetchDataFromWSPRrocks();
+      lastWSPRfetchTime = now;
+      WSPRscreenCycleIndex = 0; // Restart screen cycle
+      lastWSPRScreenChange = now;
     }
 
     currentEpochTime = timeClient.getEpochTime();
@@ -484,14 +559,47 @@ void loop()
     {
       currentRemainingSeconds = nextPosixTxTime - timeClient.getEpochTime();
 
+      // Show countdown without newline
+      Serial.print("\r⏳ TX starts in ");
+      Serial.print(currentRemainingSeconds);
+      Serial.print(" s   "); // Extra spaces to clear any leftover digits
+
       if (currentRemainingSeconds < 5 && warmingup == false)
       {
         si5351_WarmingUp();
         initialRemainingSeconds = 5;
       }
 
-      // delay(100); // Wait for 100 milliseconds
+      unsigned long now = millis();
+
+      // 🔁 Cycle through 3 displays every 4 seconds
+      if (now - lastWSPRScreenChange >= 4000)
+      {
+        switch (WSPRscreenCycleIndex)
+        {
+        case 0:
+          drawEURmapWithSpots(); // 🗺️ Europe view
+    tft.setFreeFont(&FreeSansBold12pt7b);
+          tft.drawString("Next tx in " + String(currentRemainingSeconds) + " s   ", 1,1,4);
+
+
+          
+          break;
+        case 1:
+          drawWorldMapWithSpots(); // 🌍 World view
+  
+          tft.drawCentreString(("Next tx in " + String(currentRemainingSeconds) + " s   "),TFT_WIDTH/2,220,4);
+          break;
+        case 2:
+          drawTop10WSPRtable(); // 📋 Table view
+          break;
+        }
+
+        WSPRscreenCycleIndex = (WSPRscreenCycleIndex + 1) % 3; // ➕ Loop 0 → 1 → 2 → 0 ...
+        lastWSPRScreenChange = now;
+      }
     }
+    Serial.println(); // Move to a new line after the countdown ends
 
     currentRemainingSeconds = 0;
     nextPosixTxTime = nextPosixTxTime + intervalBetweenTx;
@@ -499,10 +607,10 @@ void loop()
     Serial.println("\nStarting transmission");
     startTransmission();
     // 🛑 Transmission End
-    if (modeOfOperation == 4)
-    {
-      si5351.set_clock_pwr(SI5351_CLK0, 0);
-    }
+    // if (modeOfOperation == 4)
+    //{
+    si5351.set_clock_pwr(SI5351_CLK0, 0);
+    // }
     Serial.println("📴 --- TX OFF: Transmission Complete ---\n");
 
     Serial.print("\n");
@@ -670,8 +778,7 @@ void loop()
       drawFirstTime = false;
     }
     // findResonanceFrequency();
-      modeOfOperation = 19; //Sweep Menu Handling
-
+    modeOfOperation = 19; // Sweep Menu Handling
 
     return;
   }
@@ -920,21 +1027,19 @@ void loop()
 
             // Print sweep range in MHz
             Serial.printf("📈 Sweep range: %.1f MHz ➝ %.1f MHz\n", startHz / 1e6, endHz / 1e6);
-            //intermediate http menud
-            // Margins and plot dimensions
+            // intermediate http menud
+            //  Margins and plot dimensions
 
-
-  // Clear the plot area
-  tft.fillRect(0, 25, 320, 240, TFT_BLACK);
-  tft.setTextColor(TFT_GOLD, TFT_BLACK);
-  tft.drawCentreString("Visit",180,TFT_HEIGHT/2/2,4);
-    tft.drawCentreString("http://mlatoolbox.local",180,TFT_HEIGHT/2,4);
-    tft.drawCentreString("or wait here....",180,TFT_HEIGHT/4*3,4);
+            // Clear the plot area
+            tft.fillRect(0, 25, 320, 240, TFT_BLACK);
+            tft.setTextColor(TFT_GOLD, TFT_BLACK);
+            tft.drawCentreString("Visit", TFT_WIDTH / 2, TFT_HEIGHT / 2 / 2, 4);
+            tft.drawCentreString("http://mlatoolbox.local", TFT_WIDTH / 2, TFT_HEIGHT / 2, 4);
+            tft.drawCentreString("or wait here....", TFT_WIDTH / 2, TFT_HEIGHT / 4 * 3, 4);
 
             while (1)
             {
-         
-       
+
               unsigned long result = sweepBand(startHz, endHz);
 
               Serial.printf("🎯 sweepBand() completed, resonance = %.3f MHz\n", result / 1e6);
@@ -950,7 +1055,7 @@ void loop()
                   if (key == '0' || key == '#' || key == '*')
                   {
                     Serial.println("🔁 Reboot key detected — rebooting...");
-                    ///displayMessageAndReboot();
+                    /// displayMessageAndReboot();
                   }
 
                   break; // handle only the first detected key
@@ -972,7 +1077,6 @@ void loop()
             Serial.println("❗ Valid keys: [0] for reboot, [1–7] for band selection.");
           }
         }
-     
       }
     }
 
@@ -2746,13 +2850,14 @@ unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
   unsigned long fineStartHz = coarsePeakFreq - fineSpanHz / 2;
   unsigned long fineStopHz = coarsePeakFreq + fineSpanHz / 2;
 
-unsigned long spanHz = fineStopHz - fineStartHz;
-unsigned long safeStepHz = max(1UL, spanHz / 360);
+  unsigned long spanHz = fineStopHz - fineStartHz;
+  unsigned long safeStepHz = max(1UL, spanHz / 360);
 
-if (verbose)
-  Serial.printf("🔹 FINE SWEEP RANGE: %lu Hz ➝ %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, safeStepHz);
+  if (verbose)
+    Serial.printf("🔹 FINE SWEEP RANGE: %lu Hz ➝ %lu Hz (step: %lu Hz)\n", fineStartHz, fineStopHz, safeStepHz);
 
-for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += safeStepHz) {
+  for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += safeStepHz)
+  {
 
     si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
     delay(frequChangeDelay);
@@ -3497,4 +3602,399 @@ void displayKeypadOrSImoduleError()
   tft.drawCentreString("73! de HB9IIU", tft.width() / 2, tft.height() / 4 * 3, 4);
   delay(2000);
   ESP.restart();
+}
+
+////WSPR MAPS
+
+void getLatLonFromLocatorForWSPR(const char *locator)
+{
+  if (strlen(locator) < 4)
+  {
+    Serial.println("⚠️ Locator too short!");
+    return;
+  }
+
+  // Normalize to exactly 6 characters (pad with 'M' if needed)
+  char grid[7] = "MM00mm"; // default padding
+  for (int i = 0; i < 6 && locator[i]; ++i)
+  {
+    grid[i] = locator[i];
+  }
+  grid[6] = '\0'; // null-terminate
+
+  // Convert Maidenhead to lat/lon (center of grid square)
+  homeLongitude = (grid[0] - 'A') * 20 - 180;
+  homeLatitude = (grid[1] - 'A') * 10 - 90;
+  homeLongitude += (grid[2] - '0') * 2;
+  homeLatitude += (grid[3] - '0') * 1;
+  homeLongitude += ((grid[4] - 'a') + 0.5f) * 5.0f / 60.0f;
+  homeLatitude += ((grid[5] - 'a') + 0.5f) * 2.5f / 60.0f;
+
+  Serial.printf("📍 Locator %s → Lat: %.6f, Lon: %.6f\n", grid, homeLatitude, homeLongitude);
+}
+
+void drawTop10WSPRtable()
+{
+  tft.fillScreen(TFT_BLACK);               // 🧽 Clear screen
+  tft.setFreeFont(&FreeMonoBold9pt7b);     // 🖋️ Set readable font
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK); // 🟡 Header color
+
+  tft.setCursor(1, 15);
+  tft.print("Id Time  Call     Band km"); // 📋 Header row
+  tft.setFreeFont(&FreeMono9pt7b);        // 🖋️ Set readable font
+
+  tft.setTextColor(TFT_WHITE, TFT_BLACK); // ⚪ Row color
+
+  // 🧾 Show top 5 entries (or fewer if less data)
+  for (int i = 0; i < 10; ++i)
+  {
+    if (i >= totalWSPRentries)
+      break;
+
+    int y = (i + 2) * 20 - 5;
+    tft.setCursor(1, y);
+
+    // 🖨️ Print one line of spot data
+    tft.printf("%2d %5s %-9s %2s %6s",
+               i + 1,
+               WSPRspots[i].time.c_str(),
+               WSPRspots[i].callsign.c_str(),
+               WSPRspots[i].band.c_str(),
+               WSPRspots[i].distance.c_str());
+  }
+}
+
+String WSPRurlencode(const String &str)
+{
+  String encodedStr = "";
+  char buffer[4];
+  for (unsigned int i = 0; i < str.length(); i++)
+  {
+    char c = str.charAt(i);
+    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~')
+    {
+      encodedStr += c;
+    }
+    else
+    {
+      snprintf(buffer, sizeof(buffer), "%%%02X", c);
+      encodedStr += buffer;
+    }
+  }
+  return encodedStr;
+}
+
+void printWSPRSpotData()
+{
+  // Print table headers
+  Serial.println("Time   | Callsign    | Band    | Distance (km) | Latitude  | Longitude");
+  Serial.println("---------------------------------------------------------------");
+
+  // Loop through the WSPRspots array and print each spot in a formatted way
+  for (int i = 0; i < totalWSPRentries; i++)
+  {
+    String timeStr = WSPRspots[i].time;
+
+    // Ensure the time is exactly 5 characters long (HH:MM format)
+    if (timeStr.length() == 4)
+    {
+      timeStr = "0" + timeStr; // Add leading zero for single-digit hours
+    }
+
+    String callsign = WSPRspots[i].callsign;
+    String band = WSPRspots[i].band;
+    String distance = WSPRspots[i].distance;
+    String lat = String(WSPRspots[i].lat, 6); // Print latitude with 6 decimals
+    String lon = String(WSPRspots[i].lon, 6); // Print longitude with 6 decimals
+
+    // Print formatted data with fixed width for each column
+    Serial.print(timeStr); // Time
+    Serial.print(" | ");
+    Serial.print(callsign); // Callsign
+    Serial.print(" | ");
+    Serial.print(band); // Band
+    Serial.print(" | ");
+    Serial.print(distance); // Distance
+    Serial.print("   | ");
+    Serial.print(lat); // Latitude
+    Serial.print(" | ");
+    Serial.println(lon); // Longitude
+  }
+}
+
+void fetchDataFromWSPRrocks()
+{
+  String uncodedQuery = String("WITH RankedRecords AS (\n") +
+                        String("  SELECT\n") +
+                        String("    band,\n") +
+                        String("    rx_sign,\n") +
+                        String("    time,\n") +
+                        String("    rx_lat,\n") +
+                        String("    rx_lon,\n") +
+                        String("    distance,\n") +
+                        String("    ROW_NUMBER() OVER (PARTITION BY rx_sign ORDER BY time DESC) AS rn\n") +
+                        String("  FROM wspr.rx\n") +
+                        String("  WHERE time > subtractHours(now(), ") + hoursToSubtractInWSPRquery + String(")\n") +
+                        String("    AND tx_sign = '") + String(call) + String("'\n") +
+                        String(")\n") +
+                        String("SELECT\n") +
+                        String("  band,\n") +
+                        String("  rx_sign,\n") +
+                        String("  time,\n") +
+                        String("  rx_lat,\n") +
+                        String("  rx_lon,\n") +
+                        String("  distance\n") +
+                        String("FROM RankedRecords\n") +
+                        String("WHERE rn = 1\n") +
+                        String("ORDER BY distance DESC\n") +
+                        String("LIMIT 50;");
+  String encodedQuery = WSPRurlencode(uncodedQuery);
+
+  String fullURL = "https://db1.wspr.live:443/?query=" + encodedQuery;
+
+  Serial.println("🔗 Full WSPR query URL:");
+  Serial.println(fullURL); // Print full URL
+
+  HTTPClient http;
+  http.begin(fullURL);
+  int httpCode = http.GET();
+
+  if (httpCode > 0)
+  {
+    String payload = http.getString();
+
+    int lineStart = 0;
+    totalWSPRentries = 0;
+    while (lineStart < payload.length() && totalWSPRentries < maxWSPRentries)
+    {
+      int lineEnd = payload.indexOf('\n', lineStart);
+      if (lineEnd == -1)
+        lineEnd = payload.length();
+
+      String line = payload.substring(lineStart, lineEnd);
+      lineStart = lineEnd + 1;
+      if (line.length() == 0)
+        continue;
+
+      String fields[6];
+      int fieldIndex = 0, lastPos = 0;
+      while (fieldIndex < 6)
+      {
+        int tabPos = line.indexOf('\t', lastPos);
+        if (tabPos == -1)
+          tabPos = line.length();
+        fields[fieldIndex] = line.substring(lastPos, tabPos);
+        lastPos = tabPos + 1;
+        fieldIndex++;
+      }
+
+      String timestamp = fields[2];
+      int hour = timestamp.substring(11, 13).toInt() + timeZoneOffsetInHoursForWSPRtable;
+      if (hour >= 24)
+        hour -= 24;
+      if (hour < 0)
+        hour += 24;
+      String timeStr = String(hour) + ":" + timestamp.substring(14, 16);
+
+      int bandNumeric = fields[0].toInt();
+      const char *bandLabel = getWSPRBandLabel(bandNumeric);
+
+      String callsign = fields[1];
+      if (callsign.length() > 9)
+      {
+        callsign = callsign.substring(0, 8) + "."; // Truncate to 8 chars and add dot
+      }
+      else
+      {
+        while (callsign.length() < 9)
+          callsign += " "; // Pad to fixed width
+      }
+
+      WSPRspots[totalWSPRentries].time = timeStr;
+      WSPRspots[totalWSPRentries].callsign = callsign;
+      WSPRspots[totalWSPRentries].band = String(bandLabel);
+      WSPRspots[totalWSPRentries].distance = fields[5].substring(0, fields[5].indexOf('.')); // Remove decimals and 'km'
+      WSPRspots[totalWSPRentries].lat = fields[3].toFloat();
+      WSPRspots[totalWSPRentries].lon = fields[4].toFloat();
+
+      totalWSPRentries++;
+    }
+  }
+  http.end();
+  printWSPRSpotData();
+}
+
+void drawGreatCircleWorld(float lat1, float lon1, float lat2, float lon2, uint16_t color = TFT_YELLOW)
+{
+  const int segments = 200; // 🔁 More segments = smoother arc
+
+  int screenWidth = tft.width();   // Get current screen width
+  int screenHeight = tft.height(); // Get current screen height
+
+  // 🔄 Convert input coordinates from degrees to radians
+  // 📍 Convert starting latitude and longitude to radians (home position)
+  lat1 = radians(lat1);
+  lon1 = radians(lon1);
+
+  // 🎯 Convert destination latitude and longitude to radians (spot position)
+  lat2 = radians(lat2);
+  lon2 = radians(lon2);
+
+  // 🔄 Loop through each segment to interpolate along the great circle
+  for (int i = 0; i < segments; i++)
+  {
+    // 🧮 Fractional progress along the arc (from 0.0 to 1.0)
+    float f1 = (float)i / segments;
+    float f2 = (float)(i + 1) / segments;
+
+    // 📏 Compute angle between the two points (great circle distance)
+    float angle = acos(sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(lon2 - lon1));
+
+    // 🧭 Spherical linear interpolation (slerp) — point at fraction f1
+    float A = sin((1 - f1) * angle) / sin(angle);
+    float B = sin(f1 * angle) / sin(angle);
+
+    // 🔄 Convert from spherical to Cartesian coordinates (unit sphere)
+    float x = A * cos(lat1) * cos(lon1) + B * cos(lat2) * cos(lon2);
+    float y = A * cos(lat1) * sin(lon1) + B * cos(lat2) * sin(lon2);
+    float z = A * sin(lat1) + B * sin(lat2);
+
+    // 📍 Convert back to latitude and longitude (radians)
+    float lat = atan2(z, sqrt(x * x + y * y));
+    float lon = atan2(y, x);
+
+    // 🖼️ Map lat/lon to screen coordinates (equirectangular projection)
+    int px1 = map(degrees(lon) + 180, 0, 360, 0, screenWidth);
+    int py1 = map(90 - degrees(lat), 0, 180, 0, screenHeight);
+
+    // 🔁 Repeat interpolation for the next point (f2)
+    A = sin((1 - f2) * angle) / sin(angle);
+    B = sin(f2 * angle) / sin(angle);
+
+    x = A * cos(lat1) * cos(lon1) + B * cos(lat2) * cos(lon2);
+    y = A * cos(lat1) * sin(lon1) + B * cos(lat2) * sin(lon2);
+    z = A * sin(lat1) + B * sin(lat2);
+
+    lat = atan2(z, sqrt(x * x + y * y));
+    lon = atan2(y, x);
+
+    int px2 = map(degrees(lon) + 180, 0, 360, 0, screenWidth);
+    int py2 = map(90 - degrees(lat), 0, 180, 0, screenHeight);
+
+    // 🖊️ Draw the segment between the two interpolated points
+    tft.drawLine(px1, py1, px2, py2, color);
+  }
+}
+
+void drawGreatCircleEurope(float lat1, float lon1, float lat2, float lon2, uint16_t color = TFT_YELLOW)
+{
+  const int segments = 200; // 🔁 More segments = smoother arc
+
+  float left_lon = -12.71;
+  float right_lon = 52.8;
+  float bottom_lat = 34.8;
+  float top_lat = 71.7;
+
+  float lon_range = right_lon - left_lon;
+  float lat_range = top_lat - bottom_lat;
+
+  float screenWidth = tft.width();
+  float screenHeight = tft.height();
+
+  lat1 = radians(lat1);
+  lon1 = radians(lon1);
+  lat2 = radians(lat2);
+  lon2 = radians(lon2);
+
+  float angle = acos(sin(lat1) * sin(lat2) + cos(lat1) * cos(lat2) * cos(lon2 - lon1));
+
+  for (int i = 0; i < segments; i++)
+  {
+    float f1 = (float)i / segments;
+    float f2 = (float)(i + 1) / segments;
+
+    float A = sin((1 - f1) * angle) / sin(angle);
+    float B = sin(f1 * angle) / sin(angle);
+
+    float x = A * cos(lat1) * cos(lon1) + B * cos(lat2) * cos(lon2);
+    float y = A * cos(lat1) * sin(lon1) + B * cos(lat2) * sin(lon2);
+    float z = A * sin(lat1) + B * sin(lat2);
+
+    float lat = atan2(z, sqrt(x * x + y * y));
+    float lon = atan2(y, x);
+
+    float px1 = ((degrees(lon) - left_lon) / lon_range) * screenWidth;
+    float py1 = ((top_lat - degrees(lat)) / lat_range) * screenHeight;
+
+    A = sin((1 - f2) * angle) / sin(angle);
+    B = sin(f2 * angle) / sin(angle);
+
+    x = A * cos(lat1) * cos(lon1) + B * cos(lat2) * cos(lon2);
+    y = A * cos(lat1) * sin(lon1) + B * cos(lat2) * sin(lon2);
+    z = A * sin(lat1) + B * sin(lat2);
+
+    lat = atan2(z, sqrt(x * x + y * y));
+    lon = atan2(y, x);
+
+    float px2 = ((degrees(lon) - left_lon) / lon_range) * screenWidth;
+    float py2 = ((top_lat - degrees(lat)) / lat_range) * screenHeight;
+
+    // 🖊️ Draw precise segment
+    tft.drawLine((int)px1, (int)py1, (int)px2, (int)py2, color);
+  }
+}
+
+void drawEURmapWithSpots()
+{
+  // 🖼️ Display Europe background PNG (cropped map)
+  displayPNGfromSPIFFS("eur.png", 0); // Instant render
+
+  // 🌍 Europe map bounds (as defined for your cropped projection)
+  float left_lon = -12.71;
+  float right_lon = 52.8;
+  float bottom_lat = 34.8;
+  float top_lat = 71.7;
+
+  // 📍 Transform home location to Europe map coordinates
+  int home_x = map((homeLongitude - left_lon), 0, (right_lon - left_lon), 0, tft.width());
+  int home_y = map((top_lat - homeLatitude), 0, (top_lat - bottom_lat), 0, tft.height());
+
+  // 🔁 Loop through all WSPR WSPRspots
+  for (int i = 0; i < totalWSPRentries; ++i)
+  {
+    float lat = WSPRspots[i].lat;
+    float lon = WSPRspots[i].lon;
+
+    // 🗺️ Map spot location to cropped Europe image coordinates
+    int x = map((lon - left_lon), 0, (right_lon - left_lon), 0, tft.width());
+    int y = map((top_lat - lat), 0, (top_lat - bottom_lat), 0, tft.height());
+
+    // 🔴 Draw spot
+    tft.fillCircle(x, y, 2, TFT_RED);
+
+    // 🟡 Draw great-circle arc from home to spot
+    drawGreatCircleEurope(homeLatitude, homeLongitude, lat, lon);
+  }
+
+  // 🔵 Draw home location (5px blue dot)
+  tft.fillCircle(home_x, home_y, 7, TFT_BLUE);
+}
+
+void drawWorldMapWithSpots()
+{
+  displayPNGfromSPIFFS("world.png", 0); // 🗺️ Display the map
+
+  // 🔁 Plot all WSPR spots
+  for (int i = 0; i < totalWSPRentries; ++i)
+  {
+    int x = map((WSPRspots[i].lon + 180), 0, 360, 0, tft.width());
+    int y = map((90 - WSPRspots[i].lat), 0, 180, 0, tft.height());
+
+    tft.fillCircle(x, y, 2, TFT_RED); // 🔴 Spot dot
+    drawGreatCircleWorld(homeLatitude, homeLongitude, WSPRspots[i].lat, WSPRspots[i].lon);
+  }
+  // 🔵 Draw home location (5px blue dot)
+  int homeX = map((homeLongitude + 180), 0, 360, 0, tft.width());
+  int homeY = map((90 - homeLatitude), 0, 180, 0, tft.height());
+  tft.fillCircle(homeX, homeY, 5, TFT_BLUE);
 }
