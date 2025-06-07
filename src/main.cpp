@@ -25,11 +25,15 @@
 #include <HTTPClient.h> // used for wsprrock query
 #include <ESPmDNS.h>    // Library to enable mDNS (Multicast DNS) for resolving local hostnames like "device.local"
 #include <Adafruit_MPR121.h>
-// Include the necessary library for Savitzky-Golay 
-#include <SavitzkyGolayFilter.h>
+// Include the necessary library for Savitzky-Golay
+// #include <SavitzkyGolayFilter.h>
 // https://github.com/uutzinger/SavitzkyGolayFilter
 //------------------------------------
 #include <PNGdec.h> //PNG image decoding library
+
+#define CLK_SELECTION 1 // or 1 or 2
+
+si5351_clock si5351_clk_pin;
 
 #define VERSION "2.0"
 
@@ -134,10 +138,18 @@ bool alredyDisplayedOnce = false;
 uint32_t selectedFrequencyViaKeypad = 0;
 bool vfoScreenShown = false;
 
+/*
 const char keymapFKPF[12] = {
     '*', '7', '4', '1',
     '0', '8', '5', '2',
     '#', '9', '6', '3'};
+*/
+
+const char keymapFKPF[12] = {
+    '3', '6', '9', '#',
+    '2', '5', '8', '0',
+    '1', '4', '7', '*'};
+
 const char *sweepMenuItems[] = {
     "[1] 40 m (7 MHz)",
     "[2] 30 m (10 MHz)",
@@ -242,7 +254,7 @@ void drawGreatCircleWorld(float lat1, float lon1, float lat2, float lon2, uint16
 void drawGreatCircleEurope(float lat1, float lon1, float lat2, float lon2, uint16_t color);
 void drawEURmapWithSpots();
 void drawWorldMapWithSpots();
-
+void ensureDNSisFunctional(const char *testDomain = "cloudflare.com", int maxAttempts = 10);
 //---------------------------------------------------------------------------------------------
 
 //---------------------------------------------------------------------------------------------
@@ -329,6 +341,25 @@ void setup()
   printVersionBox("Beta", VERSION);
   mountAndListSPIFFS();
 
+  if (CLK_SELECTION == 0)
+  {
+    si5351_clk_pin = SI5351_CLK0;
+  }
+  else if (CLK_SELECTION == 1)
+  {
+    si5351_clk_pin = SI5351_CLK1;
+  }
+  else if (CLK_SELECTION == 2)
+  {
+    si5351_clk_pin = SI5351_CLK2;
+  }
+  else
+  {
+    Serial.println("❌ Invalid CLK_SELECTION");
+    while (true)
+      ; // halt
+  }
+
   // Retrieve user settings
   retrieveUserSettings();
 
@@ -410,8 +441,25 @@ void setup()
     // Establish WiFi Connection
     connectToWiFi();
 
+
+ensureDNSisFunctional();
+
+
     // Start Web server
     configure_web_server_routes();
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     // Initialize timeClient for NTP synchronization
     initializeTimeClient();
@@ -426,6 +474,11 @@ void setup()
     startAPMode();
   }
 }
+
+
+
+
+
 
 // ################################################################################################
 // Loop Function
@@ -511,7 +564,6 @@ void loop()
   {
     Serial.println("\nEntering WSPR loop");
 
- 
     if (isFirstIteration)
     {
       Serial.println("\nFirst Loop Iteration to determine next start");
@@ -524,10 +576,9 @@ void loop()
       tft.drawCentreString("http://mlatoolbox.local", TFT_WIDTH / 2, TFT_HEIGHT / 2, 4);
       tft.drawCentreString("for web reporter", TFT_WIDTH / 2, TFT_HEIGHT / 4 * 3, 4);
     }
- unsigned long now = millis();
+    unsigned long now = millis();
 
     timeClient.update();
-
 
     // 🔄 Fetch WSPR data every 5 minutes
     if (now - lastWSPRfetchTime >= WSPRfetchInterval || lastWSPRfetchTime == 0)
@@ -535,11 +586,10 @@ void loop()
       Serial.println("🌐 Fetching new WSPR data...");
       fetchDataFromWSPRrocks();
       lastWSPRfetchTime = now;
-      //WSPRscreenCycleIndex = 0; // Restart screen cycle
-      //lastWSPRScreenChange = now;
+      // WSPRscreenCycleIndex = 0; // Restart screen cycle
+      // lastWSPRScreenChange = now;
       now = millis();
     }
-  
 
     currentEpochTime = timeClient.getEpochTime();
     Serial.print("\nCurrent time: ");
@@ -602,8 +652,6 @@ void loop()
         lastWSPRScreenChange = now;
       }
 
-      //Serial.println("I am here...");
-      //Serial.println(WSPRscreenCycleIndex);
       if (currentRemainingSeconds != previousRemainingSeconds)
       {
         previousRemainingSeconds = currentRemainingSeconds;
@@ -630,7 +678,7 @@ void loop()
     // 🛑 Transmission End
     // if (modeOfOperation == 4)
     //{
-    si5351.set_clock_pwr(SI5351_CLK0, 0);
+    si5351.set_clock_pwr(si5351_clk_pin, 0);
     // }
     Serial.println("📴 --- TX OFF: Transmission Complete ---\n");
 
@@ -794,11 +842,10 @@ void loop()
   {
     if (drawFirstTime)
     {
-
       displayAnalyzeMenu();
       drawFirstTime = false;
     }
-    // findResonanceFrequency();
+
     modeOfOperation = 19; // Sweep Menu Handling
 
     return;
@@ -1025,7 +1072,7 @@ void loop()
 
             if (key == '7')
             {
-              startHz = 7000000UL;
+              startHz = 6000000UL;
               endHz = 30000000UL;
             }
             else
@@ -1057,33 +1104,19 @@ void loop()
             tft.drawCentreString("Visit", TFT_WIDTH / 2, TFT_HEIGHT / 2 / 2, 4);
             tft.drawCentreString("http://mlatoolbox.local", TFT_WIDTH / 2, TFT_HEIGHT / 2, 4);
             tft.drawCentreString("or wait here....", TFT_WIDTH / 2, TFT_HEIGHT / 4 * 3, 4);
+            delay(250);
+            Serial.println("here to wait finger is released");
+            uint16_t touched = cap.touched();
 
+            touchInterrupt = 0;
             while (1)
             {
-
+ 
               unsigned long result = sweepBand(startHz, endHz);
 
               Serial.printf("🎯 sweepBand() completed, resonance = %.3f MHz\n", result / 1e6);
-              uint16_t touched = cap.touched();
 
-              for (int i = 0; i < 12; i++)
-              {
-                if (touched & (1 << i))
-                {
-                  char key = keymapFKPF[i];
-                  Serial.printf("🔘 Key pressed: %c (pin %d)\n", key, i);
-
-                  if (key == '0' || key == '#' || key == '*')
-                  {
-                    Serial.println("🔁 Reboot key detected — rebooting...");
-                    /// displayMessageAndReboot();
-                  }
-
-                  break; // handle only the first detected key
-                }
-              }
-
-              delay(100);
+          
             }
           }
           else if (key == '0')
@@ -1249,11 +1282,6 @@ void displayPNGfromSPIFFS(const char *filename, int duration_ms)
 
   delay(duration_ms);
 }
-
-// bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-
-// ################################################################################################
-// Functions Implementation
 
 void printVersionBox(const String &text, String version)
 {
@@ -1784,7 +1812,7 @@ void configure_web_server_routes()
       preferences.putInt("cal_factor", cal_factor);
       preferences.end();
       Serial.printf("\n📏 Calibration factor saved: %d\n", cal_factor);
-      si5351.set_clock_pwr(SI5351_CLK0, 0);  // TX OFF
+      si5351.set_clock_pwr(si5351_clk_pin, 0);  // TX OFF
       Serial.println("✅ Exiting Calibration Mode, WSPR TX Resumed.");
     }
     request->send(200, "text/plain", "Calibration factor saved"); });
@@ -1845,12 +1873,13 @@ void initializeTimeClient()
 {
   Serial.println("⏰ Initializing NTP Time Client...");
   timeClient.begin();
+  /*
   timeClient.setTimeOffset(timeOffset * 3600);
 
   Serial.print("🌍 Time Offset set to: ");
   Serial.print(timeOffset);
   Serial.println(" hour(s) ⏱️");
-
+*/
   Serial.println("✅ NTP Time Client Ready!");
 }
 void updateNTPTime()
@@ -1914,6 +1943,8 @@ void updateNTPTime()
   esp_restart();
 }
 
+
+
 void initializeNextTransmissionTime()
 {
   // 🕒 Get Current Epoch Time
@@ -1966,8 +1997,8 @@ void si5351_WarmingUp()
   Serial.print(formatFrequencyWithDots(TX_referenceFrequ));
   Serial.println(")");
   // ⚙️ Configure Si5351 for transmission
-  si5351.set_freq(WSPR_TX_operatingFrequ, SI5351_CLK0);
-  si5351.set_clock_pwr(SI5351_CLK0, 1); // Power ON CLK0
+  si5351.set_freq(WSPR_TX_operatingFrequ, si5351_clk_pin);
+  si5351.set_clock_pwr(si5351_clk_pin, 1); // Power ON CLK0
 }
 void printWithThousandsSeparator(unsigned long num)
 {
@@ -1996,7 +2027,7 @@ void transmitWSPR()
   for (int i = 0; i < SYMBOL_COUNT; i++)
   {
     uint64_t toneFreq = WSPR_TX_operatingFrequ + (tx_buffer[i] * TONE_SPACING);
-    si5351.set_freq(toneFreq, SI5351_CLK0);
+    si5351.set_freq(toneFreq, si5351_clk_pin);
     delay(WSPR_DELAY);
     if (interruptWSPRcurrentTX == true)
     {
@@ -2072,28 +2103,6 @@ void TX_ON_counter_core0(void *parameter)
   // Delete the task if tx_is_ON is false to free resources
   vTaskDelete(NULL);
 }
-
-/*
-std::string getBandFromFrequency(uint32_t frequency)
-{
-
-  const char *bands[] = {
-      "80 m", "60 m", "40 m", "30 m", "20 m", "17 m", "15 m", "12 m", "10 m", "6 m"};
-
-  const size_t numBands = sizeof(WSPRbandStartFrequencies) / sizeof(WSPRbandStartFrequencies[0]);
-
-  for (size_t i = 0; i < numBands; ++i)
-  {
-    if (frequency >= WSPRbandStartFrequencies[i] &&
-        (i == numBands - 1 || frequency < WSPRbandStartFrequencies[i + 1]))
-    {
-      return bands[i];
-    }
-  }
-
-  return "???"; // Frequency does not match any defined bands
-}
-*/
 
 void startAPMode()
 {
@@ -2197,8 +2206,6 @@ void startAPMode()
   server.begin();
   Serial.println("✅ AP Web server started and ready to serve at http://192.168.4.1 ⚙️");
 }
-
-// ########################## RELATED TO TUNER ####################################
 
 void drawAnalogMeter()
 {
@@ -2424,7 +2431,7 @@ void setFrequencyInMhz(float freqMHz)
   Serial.println("⚙️ Setting frequency on SI5351...");
 
   // Power down CLK0 before reconfiguring
-  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  si5351.set_clock_pwr(si5351_clk_pin, 0);
   Serial.println("🔌 CLK0 powered OFF");
 
   // Convert MHz to Hz
@@ -2434,11 +2441,11 @@ void setFrequencyInMhz(float freqMHz)
   Serial.println(" MHz");
 
   // Set frequency (multiply by 100 for 100ths of Hz resolution)
-  si5351.set_freq(freq * 100ULL, SI5351_CLK0);
+  si5351.set_freq(freq * 100ULL, si5351_clk_pin);
   Serial.println("📶 Frequency set successfully");
 
   // Power on CLK0
-  si5351.set_clock_pwr(SI5351_CLK0, 1);
+  si5351.set_clock_pwr(si5351_clk_pin, 1);
   Serial.println("✅ SI5351 CLK0 powered ON");
 }
 
@@ -2462,7 +2469,7 @@ unsigned long findResonanceFrequencyFIRST()
   int tempAdc[MAX_SWEEP_POINTS];
   int tempCount = 0;
 
-  si5351.set_clock_pwr(SI5351_CLK0, 1);
+  si5351.set_clock_pwr(si5351_clk_pin, 1);
 
   // === COARSE SWEEP ===
   if (verbose)
@@ -2470,7 +2477,7 @@ unsigned long findResonanceFrequencyFIRST()
 
   for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
   {
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    si5351.set_freq(freqHz * 100ULL, si5351_clk_pin);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, 1);
     // Serial.printf("COARSE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
@@ -2528,7 +2535,7 @@ unsigned long findResonanceFrequencyFIRST()
 
   for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += fineStepHz)
   {
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    si5351.set_freq(freqHz * 100ULL, si5351_clk_pin);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
     // Serial.printf("FINE;%d;%lu;%d\n", sweepCounter++, freqHz, adcValue);
@@ -2582,7 +2589,7 @@ unsigned long findResonanceFrequencyFIRST()
   bestAdcAtSweep = finePeakAdc;
   noiseFloor = minAdcValue;
 
-  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  si5351.set_clock_pwr(si5351_clk_pin, 0);
   delay(2000);
   return resonanceFrequ;
 }
@@ -2608,7 +2615,7 @@ unsigned long findResonanceFrequency()
   int tempAdc[MAX_SWEEP_POINTS];
   int tempCount = 0;
 
-  si5351.set_clock_pwr(SI5351_CLK0, 1); // Power on SI5351 clock 0
+  si5351.set_clock_pwr(si5351_clk_pin, 1); // Power on SI5351 clock 0
 
   // === COARSE SWEEP ===
   if (verbose)
@@ -2616,7 +2623,7 @@ unsigned long findResonanceFrequency()
 
   for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
   {
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    si5351.set_freq(freqHz * 100ULL, si5351_clk_pin);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, 1);
 
@@ -2679,7 +2686,7 @@ unsigned long findResonanceFrequency()
 
   for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += fineStepHz)
   {
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    si5351.set_freq(freqHz * 100ULL, si5351_clk_pin);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
 
@@ -2736,54 +2743,67 @@ unsigned long findResonanceFrequency()
   noiseFloor = minAdcValue;
   range = finePeakAdc - minAdcValue;
 
-  si5351.set_clock_pwr(SI5351_CLK0, 0); // Turn off SI5351
-  delay(2000);                          // Small delay before returning
+  si5351.set_clock_pwr(si5351_clk_pin, 0); // Turn off SI5351
+                                           // Small delay before returning
 
   return resonanceFrequ;
 }
 
 void plotFineSweep(unsigned long fine_sweep_frequ[], int fine_sweep_adc[], int fineSweepCount,
                    unsigned long fineFreqStart, unsigned long fineFreqEnd,
-                   int minAdcValue, int finePeakAdc, unsigned long resonanceFreq)
+                   unsigned long resonanceFreq)
 {
-
   // Margins and plot dimensions
   const int topMargin = 35;
-  const int bottomMargin = 20;
+  const int bottomMargin = 30;
+  const int leftMargin = 30;
   const int plotWidth = 320;
   const int plotHeight = 240 - topMargin - bottomMargin;
 
   // Clear the plot area
   tft.fillRect(0, topMargin - 10, plotWidth, plotHeight + 10, TFT_BLACK);
 
-  // Scaling factors for frequency (X-axis) and ADC (Y-axis)
-  const float freqScale = float(plotWidth - 30) / (fineFreqEnd - fineFreqStart);
-  const float adcScale = float(plotHeight) / (finePeakAdc - minAdcValue);
+  // --- Find min and max ADC values ---
+  int minAdcValue = fine_sweep_adc[0];
+  int maxAdcValue = fine_sweep_adc[0];
+  for (int i = 1; i < fineSweepCount; i++)
+  {
+    if (fine_sweep_adc[i] < minAdcValue)
+      minAdcValue = fine_sweep_adc[i];
+    if (fine_sweep_adc[i] > maxAdcValue)
+      maxAdcValue = fine_sweep_adc[i];
+  }
 
-  // Plot fine sweep data (inverted Y-axis)
+  // Prevent divide-by-zero
+  if (fineFreqEnd == fineFreqStart || maxAdcValue == minAdcValue)
+    return;
+
+  // Scaling factors
+  const float freqScale = float(plotWidth - leftMargin) / (fineFreqEnd - fineFreqStart);
+  const float adcScale = float(plotHeight) / (maxAdcValue - minAdcValue);
+
+  // Plot fine sweep data (Y-axis normal: higher ADC = lower on screen)
   for (int i = 0; i < fineSweepCount - 1; i++)
   {
-    int x1 = 30 + (fine_sweep_frequ[i] - fineFreqStart) * freqScale;
-    int y1 = topMargin + (fine_sweep_adc[i] - minAdcValue) * adcScale; // Inverted: higher ADC = higher y-value
-    int x2 = 30 + (fine_sweep_frequ[i + 1] - fineFreqStart) * freqScale;
-    int y2 = topMargin + (fine_sweep_adc[i + 1] - minAdcValue) * adcScale; // Inverted: higher ADC = higher y-value
+    int x1 = leftMargin + (fine_sweep_frequ[i] - fineFreqStart) * freqScale;
+    int y1 = topMargin + (fine_sweep_adc[i] - minAdcValue) * adcScale;
+    int x2 = leftMargin + (fine_sweep_frequ[i + 1] - fineFreqStart) * freqScale;
+    int y2 = topMargin + (fine_sweep_adc[i + 1] - minAdcValue) * adcScale;
 
     tft.drawLine(x1, y1, x2, y2, TFT_GREEN);
   }
 
   // Draw vertical line at resonance frequency
-  int resonanceX = 30 + (resonanceFreq - fineFreqStart) * freqScale;
-  tft.drawLine(resonanceX, topMargin, resonanceX, 240 - bottomMargin, TFT_GOLD);
+  int resonanceX = leftMargin + (resonanceFreq - fineFreqStart) * freqScale;
+  tft.drawLine(resonanceX, topMargin, resonanceX, 240 - bottomMargin, TFT_RED);
 
   // Draw black frame for frequency label
   tft.fillRect(0, 240 - bottomMargin, 320, bottomMargin, TFT_BLACK);
 
   // Display the resonance frequency
   tft.setTextColor(TFT_GOLD, TFT_BLACK);
-  // Display the resonance frequency with " Hz"
-  String resonanceString = formatFrequencyWithDots(resonanceFreq) + " Hz"; // Concatenate " Hz"
-  tft.setTextColor(TFT_GOLD, TFT_BLACK);
-  tft.drawCentreString(resonanceString, 160, 220, 4);
+  String resonanceString = formatFrequencyWithDots(resonanceFreq) + " Hz";
+  tft.drawCentreString(resonanceString, 160, 215, 4);
 }
 
 unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
@@ -2791,9 +2811,8 @@ unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
   bool verbose = false;
 
   // === Sweep Configuration ===
-  const unsigned long coarseStepHz = 20000UL;
-
-  const unsigned long fineSpanHz = 400000UL;
+  unsigned long coarseStepHz = (coarseEndHz - coarseStartHz) / MAX_SWEEP_POINTS;
+  const unsigned long fineSpanHz = 200000UL;
   int fineAdcSamples = 1;
 
   int frequChangeDelay = 0;
@@ -2804,8 +2823,7 @@ unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
   unsigned long tempFreq[MAX_SWEEP_POINTS];
   int tempAdc[MAX_SWEEP_POINTS];
   int tempCount = 0;
-
-  si5351.set_clock_pwr(SI5351_CLK0, 1); // Power on SI5351 clock 0
+  si5351.set_clock_pwr(si5351_clk_pin, 1); // Power on SI5351 clock 0
 
   // === COARSE SWEEP ===
   if (verbose)
@@ -2813,10 +2831,23 @@ unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
 
   for (unsigned long freqHz = coarseStartHz; freqHz <= coarseEndHz; freqHz += coarseStepHz)
   {
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+    si5351.set_freq(freqHz * 100ULL, si5351_clk_pin);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, 1);
-
+     if (touchInterrupt == 1)
+    {
+      Serial.print("User touched keypad:");
+      // uint16_t touched = cap.touched();
+      // Serial.print(touched);
+       displayMessageAndReboot();
+      Serial.println(cap.touched());
+      delay(1000);
+touchInterrupt = false;
+      initSI5351();
+      displayMainMenu();
+      break;
+      
+    }
     if (verbose)
       Serial.printf("🟨 COARSE;%d;%lu;%d\n", sweepCounter, freqHz, adcValue);
 
@@ -2859,7 +2890,7 @@ unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
   if (verbose)
     Serial.println("🔷 --- FINE SWEEP START ---");
 
-  fineAdcSamples = 2;
+  fineAdcSamples = 15;
   tempCount = 0;
 
   for (int i = 0; i < MAX_SWEEP_POINTS; i++)
@@ -2879,8 +2910,22 @@ unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
 
   for (unsigned long freqHz = fineStartHz; freqHz <= fineStopHz; freqHz += safeStepHz)
   {
-
-    si5351.set_freq(freqHz * 100ULL, SI5351_CLK0);
+  if (touchInterrupt == 1)
+    {
+      Serial.print("User touched keypad:");
+      // uint16_t touched = cap.touched();
+      // Serial.print(touched);
+      displayMessageAndReboot();
+      Serial.println(cap.touched());
+ 
+      delay(1000);
+      touchInterrupt = false;
+      initSI5351();
+      displayMainMenu();
+      break;
+     
+    }
+    si5351.set_freq(freqHz * 100ULL, si5351_clk_pin);
     delay(frequChangeDelay);
     int adcValue = readAveragedAdc(ADC_PIN, fineAdcSamples);
 
@@ -2937,9 +2982,12 @@ unsigned long sweepBand(unsigned long coarseStartHz, unsigned long coarseEndHz)
   noiseFloor = minAdcValue;
   range = finePeakAdc - minAdcValue;
 
-  plotFineSweep(fine_sweep_frequ, fine_sweep_adc, fineSweepCount, coarsePeakFreq - fineSpanHz / 2, coarsePeakFreq + fineSpanHz / 2, minAdcValue, finePeakAdc, resonanceFrequ);
+  plotFineSweep(fine_sweep_frequ, fine_sweep_adc, fineSweepCount,
+                coarsePeakFreq - fineSpanHz / 2,
+                coarsePeakFreq + fineSpanHz / 2,
+                resonanceFrequ);
 
-  si5351.set_clock_pwr(SI5351_CLK0, 0); // Turn off SI5351
+  si5351.set_clock_pwr(si5351_clk_pin, 0); // Turn off SI5351
 
   return resonanceFrequ;
 }
@@ -3144,11 +3192,11 @@ void cw(bool state)
 {
   if (state)
   {
-    si5351.output_enable(SI5351_CLK0, 1);
+    si5351.output_enable(si5351_clk_pin, 1);
   }
   else
   {
-    si5351.output_enable(SI5351_CLK0, 0);
+    si5351.output_enable(si5351_clk_pin, 0);
   }
 }
 void updateDisplay()
@@ -3208,41 +3256,67 @@ void clearDisplayLine()
   tft.fillRect(0, cwBeaconMessageCursorY, 320, 240, TFT_NAVY);
 }
 
-// keypad
-// related to keypad
 void initSI5351()
 {
   const uint8_t SI5351_ADDRESS = 0x60;
 
-  Wire.begin(); // Start I2C (you can customize pins if needed)
+  // 🔌 Start I²C bus at 400 kHz (fast mode) — reliable and quick on ESP32
+  Wire.begin();
+  Wire.setClock(400000);
 
-  // 🧪 Check if Si5351 is responding on I²C
+  // 🔍 Probe Si5351 I²C address to check if device is present
   Wire.beginTransmission(SI5351_ADDRESS);
   if (Wire.endTransmission() != 0)
   {
     Serial.println("❌ Si5351 not found at 0x60. Check wiring or power.");
-    displayKeypadOrSImoduleError();
+    displayKeypadOrSImoduleError(); // Custom error message or fallback UI
+    return;
   }
 
+  // ✅ Found and ready to initialize
   Serial.println("✅ Success! Si5351 module found!! 🎉");
   Serial.println("📡 Initializing Si5351...");
 
-  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0);
+  // ⚙️ Initialize Si5351 with 8pF crystal load (typical for cheap boards)
+  si5351.init(SI5351_CRYSTAL_LOAD_8PF, 0, 0); // 0, 0 = use default XTAL + correction
 
+  // 🔧 Apply frequency calibration correction (in parts per billion)
   Serial.print("🔧 Applying Calibration Factor: ");
   Serial.println(cal_factor);
   si5351.set_correction(cal_factor, SI5351_PLL_INPUT_XO);
 
+  // 📶 Set frequency for selected TX clock output (CLK0, CLK1, or CLK2)
   Serial.print("📶 Setting TX Reference Frequency: ");
   Serial.print(TX_referenceFrequ);
   Serial.println(" Hz");
-  si5351.set_freq(TX_referenceFrequ, SI5351_CLK0);
+  si5351.set_freq(TX_referenceFrequ, si5351_clk_pin);
 
-  Serial.println("💪 Setting Drive Strength: 8 mA");
-  si5351.drive_strength(SI5351_CLK0, SI5351_DRIVE_8MA);
+  // 💪 Set drive strength for the selected clock output (strongest = 8 mA)
+  si5351.drive_strength(si5351_clk_pin, SI5351_DRIVE_4MA);
 
-  Serial.println("🔌 Powering down CLK0 output initially.");
-  si5351.set_clock_pwr(SI5351_CLK0, 0);
+  // 📴 Disable all unused outputs among CLK0, CLK1, and CLK2
+  Serial.print("🔌 Disabling unused clock outputs: ");
+  bool first = true;
+  si5351_clock clocks[] = {SI5351_CLK0, SI5351_CLK1, SI5351_CLK2};
+
+  for (si5351_clock clk : clocks)
+  {
+    if (clk != si5351_clk_pin)
+    {
+      si5351.set_clock_pwr(clk, 0); // Disable unused clock output
+      if (!first)
+        Serial.print(", ");
+      Serial.print("CLK");
+      Serial.print((int)clk);
+      first = false;
+    }
+  }
+  Serial.println();
+
+  // 🛑 Disable selected output initially (can be enabled later on demand)
+  Serial.print("🛑 Disabling selected clock output CLK");
+  Serial.println((int)si5351_clk_pin);
+  si5351.set_clock_pwr(si5351_clk_pin, 0);
 }
 
 void initKeypad()
@@ -3263,7 +3337,6 @@ void initKeypad()
 void IRAM_ATTR handleTouchIRQ()
 {
   touchInterrupt = true;
-  Serial.println("touche");
 }
 
 String formatFrequencyWithDotsFKPF(const String &s)
@@ -3360,7 +3433,7 @@ void handleKey(char key)
 
 void PowerSImoduleOFF()
 {
-  si5351.set_clock_pwr(SI5351_CLK0, 0); // Power OFF
+  si5351.set_clock_pwr(si5351_clk_pin, 0); // Power OFF
   Serial.println("🔌 SI5351 CLK0 powered OFF");
 }
 
@@ -4018,4 +4091,45 @@ void drawWorldMapWithSpots()
   int homeX = map((homeLongitude + 180), 0, 360, 0, tft.width());
   int homeY = map((90 - homeLatitude), 0, 180, 0, tft.height());
   tft.fillCircle(homeX, homeY, 5, TFT_BLUE);
+}
+
+
+void ensureDNSisFunctional(const char *testDomain, int maxAttempts) {
+  Serial.print("🧠 Waiting for DNS readiness...");
+  int dnsAttempts = 0;
+  while (dnsAttempts < maxAttempts)
+  {
+    IPAddress dns = WiFi.dnsIP();
+    if (dns[0] != 0)
+    {
+      Serial.println(" ✅ DNS is ready: " + dns.toString());
+      break;
+    }
+    Serial.print(".");
+    delay(500);
+    dnsAttempts++;
+  }
+
+  if (dnsAttempts >= maxAttempts)
+  {
+    Serial.println("❌ DNS not ready. Rebooting...");
+    delay(2000);
+    esp_restart();
+  }
+
+  // Test actual DNS resolution
+  IPAddress resolvedIP;
+  Serial.print("🧪 DNS test: resolving ");
+  Serial.print(testDomain);
+  Serial.print("... ");
+  if (WiFi.hostByName(testDomain, resolvedIP))
+  {
+    Serial.println("✅ Success: " + resolvedIP.toString());
+  }
+  else
+  {
+    Serial.println("❌ DNS resolution failed. Rebooting...");
+    delay(2000);
+    esp_restart();
+  }
 }
